@@ -1,0 +1,4 @@
+aiomysql==0.3.2
+packaging==26.3
+PyMySQL==1.2.3
+wheel==0.48.0
