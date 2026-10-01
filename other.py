@@ -2,6 +2,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import IntEnum, auto
 
+
 @dataclass(slots=True)
 class User:
     user_id: int
@@ -47,11 +48,7 @@ class Context:
         self.mode = Mode.WAITING if self.user is None else Mode.AUTHENTICATED
         
     def fold(self, user_id: int):
-        self.user = User(
-            user_id,
-            self.trans_user.username,
-            self.trans_user.created_on
-        )
+        self.user = User(user_id, self.trans_user.username, self.trans_user.created_on)
         self.trans_user = None
         self.cwd = None
         self.mode = Mode.AUTHENTICATED

@@ -11,33 +11,42 @@ CREATE TABLE user_accounts (
 );
 
 CREATE TABLE user_addresses (
-    address_id INT AUTO_INCREMENT PRIMARY KEY,
+    address_id INT AUTO_INCREMENT PRIMARY KEY, 
     user_id INT NOT NULL,
-    address VARCHAR(254) NOT NULL UNIQUE,
-    is_alias BOOL NOT NULL DEFAULT false,
+    user_address VARCHAR(254) NOT NULL UNIQUE,
+    forwarding_address_id INT NULL,
+    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_on DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
     FOREIGN KEY (user_id)
         REFERENCES user_accounts(user_id)
-        ON DELETE CASCADE
+        ON DELETE CASCADE,
+    FOREIGN KEY (forwarding_address_id)
+        REFERENCES user_addresses(address_id)
+        ON DELETE SET NULL
 );
 
-CREATE TABLE user_rules (
-    rule_id INT AUTO_INCREMENT PRIMARY KEY,
+CREATE TABLE user_actions (
+    action_id INT AUTO_INCREMENT PRIMARY KEY,
     user_id INT NOT NULL,
     priority INT NOT NULL DEFAULT 0,
-    rule TEXT NOT NULL,
+    actions TEXT NOT NULL,
     created_on DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_on DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
     FOREIGN KEY (user_id)
         REFERENCES user_accounts(user_id)
         ON DELETE CASCADE
 );
 
-CREATE TABLE contacts (
+CREATE TABLE user_contacts (
     contact_id INT AUTO_INCREMENT PRIMARY KEY,
-    contact_address VARCHAR(254) NOT NULL,
-    contact_name VARCHAR(254) NOT NULL,
     user_id INT NOT NULL,
-    UNIQUE (user_id, contact_address),
+    contact_name VARCHAR(254) NOT NULL,
+    contact_address VARCHAR(254) NOT NULL,
+    contact_relation VARCHAR(254) NULL,
+    is_blocked BOOL NOT NULL DEFAULT false,
     created_on DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_on DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    UNIQUE (user_id, contact_address),
     FOREIGN KEY (user_id)
         REFERENCES user_accounts(user_id)
         ON DELETE CASCADE
@@ -48,7 +57,7 @@ CREATE TABLE messages (
     thread_id INT NOT NULL,
     message_id INT NOT NULL,
     parent_message_id INT NULL,
-    from_address VARCHAR(254) NOT NULL,
+    sender_address VARCHAR(254) NOT NULL,
     return_path VARCHAR(254) NOT NULL,
     subject_line VARCHAR(256) NOT NULL,
     sent_on DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -65,13 +74,14 @@ CREATE TABLE messages (
         ON DELETE CASCADE,
     FOREIGN KEY (parent_message_id)
         REFERENCES messages(message_id)
+        ON DELETE CASCADE
 );
 
 CREATE TABLE message_recipients (
     message_id INT NOT NULL,
-    to_address VARCHAR(254) NOT NULL,
+    recipient_address VARCHAR(254) NOT NULL,
     type ENUM('To', 'Cc', 'Bcc') NOT NULL DEFAULT 'To',
-    PRIMARY KEY (message_id, to_address),
+    PRIMARY KEY (message_id, recipient_address),
     FOREIGN KEY (message_id)
         REFERENCES messages(message_id)
         ON DELETE CASCADE
@@ -87,7 +97,7 @@ CREATE TABLE tags (
         ON DELETE CASCADE
 );
 
-CREATE TABLE email_tags (
+CREATE TABLE message_tags (
     tag_id INT NOT NULL,
     message_id INT NOT NULL,
     PRIMARY KEY (tag_id, message_id),

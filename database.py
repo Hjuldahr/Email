@@ -1,5 +1,7 @@
 import os
+
 import aiomysql
+
 
 class Database:
     def __init__(self):
@@ -14,11 +16,10 @@ class Database:
                 db=os.environ["SQL_DB"],
             )
             
-        async with self.pool.acquire() as conn:
-            async with conn.cursor() as cur:
-                await cur.execute("SELECT VERSION();")
-                ver, = await cur.fetchone()
-                print(f"Connected to MySQL version: {ver}")
+        async with self.pool.acquire() as conn, conn.cursor() as cur:
+            await cur.execute("SELECT VERSION();")
+            ver, = await cur.fetchone()
+            print(f"Connected to MySQL version: {ver}")
                 
     async def close(self):
         self.pool.close()
