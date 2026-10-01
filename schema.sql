@@ -43,23 +43,11 @@ CREATE TABLE contacts (
         ON DELETE CASCADE
 );
 
-CREATE TABLE folders (
-    folder_id INT AUTO_INCREMENT PRIMARY KEY,
-    user_id INT NOT NULL,
-    folder_name VARCHAR(50) NOT NULL,
-    created_on DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    UNIQUE (user_id, folder_name),
-    FOREIGN KEY (user_id)
-        REFERENCES user_accounts(user_id)
-        ON DELETE CASCADE
-);
-
 CREATE TABLE messages (
     user_id INT NOT NULL,
     thread_id INT NOT NULL,
     message_id INT NOT NULL,
     parent_message_id INT NULL,
-    folder_id INT NOT NULL,
     from_address VARCHAR(254) NOT NULL,
     return_path VARCHAR(254) NOT NULL,
     subject_line VARCHAR(256) NOT NULL,
@@ -67,15 +55,11 @@ CREATE TABLE messages (
     first_read_on DATETIME NULL,
     body TEXT NULL,
     body_size INT NOT NULL DEFAULT 0,
-    dkim_signature VARBINARY(2048),
+    dkim_signature VARCHAR(2048),
     is_read BOOL NOT NULL DEFAULT false,
-    is_starred BOOL NOT NULL DEFAULT false,
-    is_important BOOL NOT NULL DEFAULT false,
     is_flagged BOOL NOT NULL DEFAULT false,
+    folder enum('Inbox', 'ASAP', 'ToDo', 'TBC', 'TBD', 'Memo', 'Spam', 'Junk', 'Archived', 'Draft', 'Outbox', 'Sent') NOT NULL DEFAULT 'Inbox',
     PRIMARY KEY (message_id),
-    FOREIGN KEY (folder_id)
-        REFERENCES folders(folder_id)
-        ON DELETE CASCADE,
     FOREIGN KEY (user_id)
         REFERENCES user_accounts(user_id)
         ON DELETE CASCADE,

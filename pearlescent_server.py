@@ -1,15 +1,10 @@
 import asyncio
-import os
-from typing import NamedTuple
+from datetime import datetime
 import uuid
-
-import aiomysql
 import bcrypt
 
-class User(NamedTuple):
-    user_id: int
-    username: str
-    password_hash: bytes | None
+from database import Database
+from other import Context, Folder, Mode, TransientUser, User
 
 class PearlescentServer:
     HOST = "127.0.0.1"
@@ -19,85 +14,86 @@ class PearlescentServer:
     NAMESPACE = uuid.UUID('99b00d33-11b3-4f37-bd46-18a624fcfe74')
 
     def __init__(self):
-        self.pool: aiomysql.Pool | None = None
+        self.db = Database()
         self.sock: asyncio.Server | None = None
 
     async def start(self):
-        if self.pool is None or self.pool.closed:
-            self.pool = await aiomysql.create_pool(
-                host=os.environ["SQL_HOST"],
-                user=os.environ["SQL_USER"],
-                password=os.environ["SQL_PASSWORD"],
-                db=os.environ["SQL_DB"],
-            )
-
-            async with self.pool.acquire() as conn:
-                async with conn.cursor() as cur:
-                    await cur.execute("SELECT VERSION();")
-                    ver, = await cur.fetchone()
-                    print(f"Connected to MySQL version: {ver}")
+        await self.db.open()
                     
         if self.sock is None:
             self.sock = await asyncio.start_server(
-                self.listen,
+                self._listen,
                 self.HOST,
                 self.MY_PORT,
             )
             
-    async def serve(self):
         async with self.sock:
             await asyncio.gather(
                 self.sock.serve_forever()
             )
+            
+    async def stop(self):
+        self.sock.close()
+        self.sock.close_clients()
+        await self.sock.wait_closed()
+        
+        await self.db.close()
     
     @staticmethod
-    async def read_frame(reader: asyncio.StreamReader) -> list[bytes]:
+    async def _read_frame(reader: asyncio.StreamReader) -> list[bytes]:
         data = await reader.readuntil(b'\v')
         return data.removesuffix(b'\v').split(b'\t')
     
-    async def listen(
+    async def _listen(
         self,
         reader: asyncio.StreamReader,
         writer: asyncio.StreamWriter,
     ):
         # format 'CMD\tmy data\tmultiline\ntext\v'
-        user: User | None = None
+        ctx = Context()
 
         writer.write(b'+OK pearlescence service ready\v')
         await writer.drain()
 
         try:
-            async with self.pool.acquire() as conn:
+            async with self.db.pool.acquire() as conn:
+                ctx.conn = conn
+                
                 while True:
-                    cmd_seq = await self.read_frame(reader)
+                    cmd_seq = await self._read_frame(reader)
 
                     match cmd_seq[0]:
                         case b'AUTH':
                             user, msg = await self.auth_cmd(conn, cmd_seq)
+                            ctx.user = user
 
                         case b'JOIN':
-                            user, msg = await self.join_cmd(conn, cmd_seq)
+                            msg = await self.join_cmd(conn, cmd_seq)
+                            
                             writer.write(msg)
                             await writer.drain()
 
-                            if user is not None:
-                                cmd_seq = await self.read_frame(reader)
-                                user, msg = await self.verify_join_cmd(conn, user, cmd_seq)
+                            if ctx.user is not None:
+                                cmd_seq = await self._read_frame(reader)
+                                msg = await self.verify_join_cmd(ctx, cmd_seq)
 
                         case b'DROP':
-                            user, msg = await self.drop_user_cmd(conn, user, cmd_seq)
+                            msg = await self.drop_user_cmd(ctx, cmd_seq)
 
                         case b'EXIT':
-                            if user is not None:
-                                msg = f'+OK Goodbye {user.user_name}!\nYou have been logged out.\v'.encode('ascii')
+                            if ctx.user is not None:
+                                msg = f'+OK Goodbye {ctx.user.user_name}!\nYou have been logged out.\v'.encode('ascii')
                             else:
                                 msg = b'+OK You are already logged out.\v'
-                            user = None
+                            ctx.user = None
 
                         case b'DC':
-                            writer.write(f'+OK Goodbye {user.user_name}!\nYou have been {"logged out and " if user is not None else ""}disconnected.\v'.encode('ascii'))
+                            writer.write(f'+OK Goodbye {ctx.user.user_name}!\nYou have been {"logged out and " if ctx.user is not None else ""}disconnected.\v'.encode('ascii'))
                             await writer.drain()
                             break
+                        
+                        case b'USE':
+                            msg = await self.use_folder_cmd(ctx, cmd_seq)
 
                         case _:
                             msg = b'-ERR Unknown Command\v'
@@ -113,17 +109,18 @@ class PearlescentServer:
             writer.close()
             await writer.wait_closed()
 
-    async def auth_cmd(self, conn, cmd_seq: list[bytes]) -> tuple[User | None, bytes]:
+
+    async def auth_cmd(self, ctx: Context, cmd_seq: list[bytes]) -> bytes:
         if len(cmd_seq) != 3:
-            return None, b'-ERR Invalid Arguments\v'
+            return b'-ERR Invalid Arguments\v'
         
         username = cmd_seq[1].decode('ascii')
         password = cmd_seq[2]
         
-        async with conn.cursor() as cur:
+        async with ctx.conn.cursor() as cur:
             await cur.execute(
                 '''
-                SELECT last_accessed_on, user_id, user_password_hash
+                SELECT user_id, user_password_hash, created_on, last_accessed_on
                 FROM user_accounts
                 WHERE user_name = %s;
                 ''',
@@ -133,19 +130,20 @@ class PearlescentServer:
             row = await cur.fetchone()
 
             if row is None:
-                return None, b'-ERR authentication failed\v'
+                return b'-ERR authentication failed\v'
             
-            last_login, user_id, password_hash = row
+            user_id, password_hash, created_on, last_login = row
             
             if not bcrypt.checkpw(password, password_hash):
-                return None, b'-ERR authentication failed\v'
+                return b'-ERR authentication failed\v'
             
             await cur.execute(
                 '''
                 SELECT COUNT(*)
                 FROM messages
-                WHERE user_id = %s
-                AND is_unread;
+                WHERE user_id = %s AND 
+                folder = 'Inbox' AND 
+                is_unread
                 ''',
                 (user_id,),
             )
@@ -158,19 +156,22 @@ class PearlescentServer:
                 ''',
                 (user_id,),
             )
-            await conn.commit()
+            await ctx.conn.commit()
         
-        user = User(user_id, username, None)
-        return user, f'+OK Welcome {username} (#{user_id})!\nYou have {unread} unread messages.\nYour last login was on {last_login}\v'.encode('ascii')
+        ctx.user = User(user_id, username, created_on, last_login)
+        ctx.mode = Mode.AUTHENTICATED
+        
+        return f'+OK Welcome {username} (#{user_id})!\nYou have {unread} unread messages in your Inbox.\nYour last login was on {last_login}\v'.encode('ascii')
+
     
-    async def join_cmd(self, conn, cmd_seq: list[bytes]) -> tuple[User | None, bytes]:
+    async def join_cmd(self, ctx: Context, cmd_seq: list[bytes]) -> bytes:
         if len(cmd_seq) != 3:
-            return None, b'-ERR Invalid Arguments\v'
+            return b'-ERR Invalid Arguments\v'
 
         username = cmd_seq[1].decode('ascii')
         password = cmd_seq[2]
 
-        async with conn.cursor() as cur:
+        async with ctx.conn.cursor() as cur:
             await cur.execute(
                 '''
                 SELECT EXISTS (
@@ -186,83 +187,123 @@ class PearlescentServer:
 
         if exists:
             return None, f'-ERR Sorry, but the username {username} was already taken!\nPlease be more creative next time.\v'.encode('ascii')
-
-        salt = bcrypt.gensalt(12)
-        password_hash = bcrypt.hashpw(password, salt)
                 
-        user = User(-1, username, password_hash)
-        return user, b'+OK Please verify your password\v'
+        ctx.trans_user = TransientUser(
+            username, 
+            bcrypt.hashpw(password, bcrypt.gensalt(12))
+        )
+        ctx.mode = Mode.VALIDATING_JOINING
         
-    async def verify_join_cmd(self, conn, user: User, cmd_seq: list[bytes]) -> tuple[User | None, bytes]:
-        if user is None:
-            return None, b'-ERR Partial authentication required\v'
+        return b'+OK Please verify your password\v'
+        
+    async def verify_join_cmd(self, ctx: Context, cmd_seq: list[bytes]) -> bytes:
+        if ctx.mode != Mode.VALIDATING_JOINING:
+            ctx.purge_transient_user()
+            return b'-ERR Invalid mode\v'
         
         if len(cmd_seq) != 1:
-            return None, b'-ERR Invalid Arguments\v'
+            ctx.purge_transient_user()
+            return b'-ERR Invalid Arguments\v'
 
         password = cmd_seq[0]
 
-        if not bcrypt.checkpw(password, user.password_hash):
-            return None, b'-ERR authentication failed\v'
+        if not bcrypt.checkpw(password, ctx.trans_user.password_hash):
+            return b'-ERR authentication failed\v'
         
-        async with conn.cursor() as cur:
+        async with ctx.conn.cursor() as cur:
             await cur.execute(
                 '''
                 INSERT INTO user_accounts(user_name, user_password_hash)
                 VALUES(%s, %s);
                 ''',
-                (user.username, user.password_hash),
+                (ctx.trans_user.username, ctx.trans_user.password_hash),
             )
 
-            user.user_id = cur.lastrowid
-            await conn.commit()
+            user_id = cur.lastrowid
+            await ctx.conn.commit()
+            
+        ctx.fold(user_id)
         
-        user.password_hash = None
-        return user, f'+OK Welcome {user.username} (#{user.user_id})!\nYou have zero unread messages.\nYour last login was never\v'.encode('ascii')
+        return f'+OK Welcome {ctx.user.username} (#{user_id})!\nYou have zero unread messages.\nYour last login was never\v'.encode('ascii')
     
     async def drop_user_cmd(
         self,
-        conn,
-        user: User | None,
+        ctx: Context,
         cmd_seq: list[bytes],
-    ) -> tuple[User | None, bytes]:
-        if user is None:
-            return user, b'-ERR Authentication required\v'
+    ) -> bytes:
+        if ctx.mode != Mode.AUTHENTICATED:
+            return b'-ERR Authentication required\v'
 
         if len(cmd_seq) != 1:
-            return user, b'-ERR Invalid Arguments\v'
+            return b'-ERR Invalid Arguments\v'
 
         password = cmd_seq[0]
 
-        async with conn.cursor() as cur:
+        async with ctx.conn.cursor() as cur:
             await cur.execute(
                 '''
                 SELECT user_password_hash
                 FROM user_accounts
                 WHERE user_id = %s;
                 ''',
-                (user.user_id,),
+                (ctx.user.user_id,),
             )
 
             row = await cur.fetchone()
 
             if row is None:
-                return None, b'-ERR Account no longer exists\v'
+                return b'-ERR Account no longer exists\v'
 
-            password_hash, = row
-
-            if not bcrypt.checkpw(password, password_hash):
-                return user, b'-ERR authentication failed\v'
+            if not bcrypt.checkpw(password, row[0]):
+                return b'-ERR authentication failed\v'
 
             await cur.execute(
                 '''
                 DELETE FROM user_accounts
                 WHERE user_id = %s;
                 ''',
-                (user.user_id,),
+                (ctx.user.user_id,),
             )
 
-            await conn.commit()
+            await ctx.conn.commit()
 
-        username = user.username
-        return None, f'+OK Goodbye {username}!\nPlease come again in the future.\v'.encode('ascii')
+        ctx.purge()
+        return f'+OK Goodbye {ctx.user.username}!\nPlease come again in the future.\v'.encode('ascii')
+    
+    async def use_folder_cmd(
+        self,
+        ctx: Context,
+        cmd_seq: list[bytes],
+    ) -> bytes:
+        if ctx.mode != Mode.AUTHENTICATED:
+            return b'-ERR Authentication required\v'
+
+        if len(cmd_seq) != 2:
+            return b'-ERR Invalid Arguments\v'
+        
+        folder_name = cmd_seq[1].decode('ascii')
+        
+        async with ctx.conn.cursor() as cur:
+            await cur.execute(
+                '''
+                SELECT folder_id, created_on
+                FROM folders
+                WHERE user_id = %s AND folder_name = %s;
+                ''',
+                (ctx.user.user_id, folder_name),
+            )
+            
+            row = await cur.fetchone()
+            
+            if row is None:
+                return f'-ERR The folder {folder_name} does not exist\v'.encode('ascii')
+            
+            folder_id, created_on = row
+            
+        ctx.cwd = Folder(
+            folder_id,
+            folder_name,
+            created_on
+        )
+        
+        return f'+OK The folder {folder_name} is now open\v'
