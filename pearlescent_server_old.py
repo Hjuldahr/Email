@@ -6,7 +6,7 @@ from database import Database
 from other import Context, Folder, Mode, TransientUser, User
 
 class Status(Enum):
-    OK = Status.OK, ""
+    OK = "+OK"
     INFO = "+INFO"
     WARN = "+WARN"
     ERR = "-ERR"
