@@ -1,7 +1,6 @@
+import asyncio
 import os
-
 import aiomysql
-
 
 class Database:
     def __init__(self):
@@ -25,3 +24,13 @@ class Database:
         self.pool.close()
         await self.pool.wait_closed()
         self.pool = None
+        
+    async def test(self):
+        await self.open()
+        await self.close()
+        
+if __name__ == '__main__':
+    test_db = Database()
+    asyncio.run(test_db.test())
+    
+    # <aiomysql.connection.Connection>

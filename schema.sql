@@ -53,7 +53,7 @@ CREATE TABLE user_contacts (
 );
 
 CREATE TABLE messages (
-    user_id INT NOT NULL,
+    sender_user_id INT NOT NULL,
     thread_id INT NOT NULL,
     message_id INT NOT NULL,
     parent_message_id INT NULL,
@@ -67,9 +67,9 @@ CREATE TABLE messages (
     dkim_signature VARCHAR(2048),
     is_read BOOL NOT NULL DEFAULT false,
     is_flagged BOOL NOT NULL DEFAULT false,
-    folder enum('Inbox', 'ASAP', 'ToDo', 'TBC', 'TBD', 'Memo', 'Spam', 'Junk', 'Archived', 'Draft', 'Outbox', 'Sent') NOT NULL DEFAULT 'Inbox',
+    folder enum('Inbox', 'ASAP', 'ToDo', 'TBC', 'TBD', 'Memo', 'Misc', 'Spam', 'Junk', 'Archive', 'Draft', 'Outbox', 'Sent') NOT NULL DEFAULT 'Inbox',
     PRIMARY KEY (message_id),
-    FOREIGN KEY (user_id)
+    FOREIGN KEY (sender_user_id)
         REFERENCES user_accounts(user_id)
         ON DELETE CASCADE,
     FOREIGN KEY (parent_message_id)
