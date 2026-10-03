@@ -5,26 +5,63 @@ from typing import Iterator
 import zlib
 
 class Operations(IntEnum):
-    PING = 0
-    REQ = 1
-    HELLO = 2
-    REGISTER = 100
-    LOGIN = 101
-    LOGOUT = 102
-    DC = 3
-    ADDR_REQ = 202
-    ADDR_REL = 203
-    ADDR = 201
-    ADDR_ON = 204
-    ADDR_OFF = 205
-    LIST_ADDR = 200
-    LIST_FEATURE = 300
-    FEATURE = 301
-    FEATURE_ON = 302
-    FEATURE_OFF = 303
-    VIEWONLY = 400
-    VIEWONLY_ON = 401
-    VIEWONLY_OFF = 402
+    PING = 0x000
+    REQ = 0x001
+    HELLO = 0x002
+    REGISTER = 0x004
+    LOGIN = 0x005
+    LOGOUT = 0x006
+    DC = 0x003
+    
+    ADDR_REQ = 0x102
+    ADDR_REL = 0x103 
+    ADDR = 0x101
+    LIST_ADDR = 0x100
+    
+    LIST_FEATURE = 0x301 
+    FEATURE = 0x302
+    VIEWONLY = 0x303
+    NOTIFY = 0x304
+    
+    DETACH = 0x403
+    MOVE = 0x404
+    FORWARD = 0x405
+    SEEN = 0x406
+    LIST = 0x400
+    LIST_THREAD = 0x401
+    FETCH = 0x407
+    DELETE = 0x408
+    RESTORE = 0x409
+    ARCH = 0x40A
+    FLAG = 0x40B
+    TAG = 0x40C
+    LIST_TAG = 0x402
+    
+    DRAFT = 0x501
+    EDIT_ADDR = 0x502
+    EDIT_THREAD = 0x503
+    EDIT_SUBJ = 0x504
+    EDIT_BODY = 0x505
+    SEND = 0x506
+    
+    LIST_ATTACH = 0x600
+    DOWNLOAD = 0x601
+    UPLOAD = 0x602
+    
+    MIRROR = 0x700
+    
+    ACT = 0x801
+    LIST_ACT = 0x800
+    
+    BLOCK = 0x901
+    LIST_BLOCK = 0x900
+    
+    CONTACT_ADD = 0xA02
+    CONTACT_REM = 0xA03
+    LIST_CONTACT = 0xA00
+    CONTACT = 0xA01
+    
+    STATUS = 0x300
     
     @classmethod
     def from_opcode(cls, opcode: int) -> Operations | None:

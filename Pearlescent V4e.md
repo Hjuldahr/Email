@@ -10,6 +10,8 @@ The specification defines observable protocol behaviour, command syntax, session
 
 The key words **MUST**, **MUST NOT**, **REQUIRED**, **SHOULD**, **SHOULD NOT**, and **MAY** are to be interpreted as normative requirements.
 
+**Opcode allocation:** Operation codes are grouped by command set. The most significant hexadecimal digit identifies the command set, while the remaining digits identify an operation within that set. Command sets generally correspond to protocol sections, with closely related operations merged into the same set where appropriate. Unassigned command sets and operation codes are reserved for future use. 
+
 ---
 
 # **1\. Protocol Model**
@@ -50,8 +52,8 @@ Each output frame contains:
 
 ## **2.3 Magic Prefix**
 
-`PRLSCNT` = 50 52 4C 53 43 4E 54
-`TNCSLRP` = 54 4E 43 53 4C 52 50
+PRLSCNT \= 50 52 4C 53 43 4E 54   
+TNCSLRP \= 54 4E 43 53 4C 52 50 
 
 The exact integer widths, signedness, byte order, checksum algorithm, checksum coverage, and maximum frame sizes are defined by the transport specification.
 
@@ -232,7 +234,7 @@ Each address entry contains:
 
 ## **5.1 LIST FEATURE**
 
-Opcode: 0x200  
+Opcode: 0x301  
 LIST FEATURE
 
 Returns the capabilities supported by the server and whether they are enabled or disabled.
@@ -243,7 +245,7 @@ The first result entry contains the status. Each subsequent result entry contain
 
 ## **5.2 FEATURE**
 
-Opcode: 0x301  
+Opcode: 0x302  
 FEATURE \[\<ON|OFF\>\] \<Features\>...
 
 Requests activation or deactivation of one or more optional features.
@@ -254,7 +256,7 @@ If the toggle argument is omitted, the current state is returned.
 
 ## **5.3 VIEWONLY**
 
-Opcode: 0x302  
+Opcode: 0x303  
 VIEWONLY \[\<ON|OFF\>\]
 
 Controls account-state modification for the current session.
@@ -273,7 +275,7 @@ Session-state operations are not considered account-state modifications.
 
 ## **5.4 NOTIFY**
 
-Opcode: 0x303  
+Opcode: 0x304  
 NOTIFY \[\<ON|OFF\>\]
 
 Controls unsolicited inbox notifications for the current session.
@@ -613,7 +615,7 @@ The offset is optional. The end position is mandatory when a range is supplied.
 ## **7.6 SEND**
 
 Opcode: 0x506  
-SEND \<Draft Message UID\> \[\<NOW|ABORT\>\]
+SEND \<Message UID\> \[\<NOW|ABORT\>\]
 
 Moves the specified draft from `DRAFTS` to `OUTBOX`.
 
@@ -851,7 +853,7 @@ leaves no attachments for `DOWN` to package.
 
 ## **10.3 ACT ON/OFF**
 
-Opcode: 0x802  
+Opcode: 0x801  
 ACT \<ON|OFF\> \<Action UID\>...
 
 Enables or disables the specified actions.
@@ -894,7 +896,7 @@ Addresses MAY be blocked by base address or alias.
 
 ## **11.2 LIST BLOCK**
 
-Op Code: 0x902  
+Op Code: 0x900  
 LIST BLOCK
 
 Returns the addresses currently on the block list and the time each address was blocked.
@@ -1039,9 +1041,9 @@ IMAP SELECT ────┐
 IMAP EXAMINE ───┼──\> Pearlescence folder/session operations  
 POP mailbox ────┘
 
-SMTP MAIL ──────┐ 
-SMTP RCPT ──────┼──\> Pearlescence DRAFT 
-SMTP DATA ──────┘ 
+SMTP MAIL ─────┐   
+SMTP RCPT ─────┼──\> Pearlescence DRAFT   
+SMTP DATA ─────┘ 
 
 SMTP remains supported for interoperability with external mail systems.
 
@@ -1065,4 +1067,3 @@ The following are intentionally outside the command semantics of this document a
 * Error/status code definitions
 
 These details MUST NOT be inferred from implementation behaviour when a transport specification is available.
-
