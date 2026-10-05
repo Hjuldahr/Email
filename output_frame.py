@@ -2,7 +2,7 @@ from __future__ import annotations
 import asyncio
 from enum import IntEnum
 import struct
-from typing import Iterator
+from typing import Iterator, Sequence
 import zlib
 
 class Status(IntEnum):
@@ -25,7 +25,7 @@ class OutputFrame:
     INNER_TRAILER = struct.Struct("!I")
     ENTRY_PREFIX = struct.Struct("!H")
 
-    def __init__(self, version: int, status: Status, entries: list[str] | None):
+    def __init__(self, version: int, status: Status, entries: Sequence[str] | None):
         self.version = version
         self.status = status
         self.entries = entries or []
@@ -56,43 +56,46 @@ class OutputFrame:
 
     @classmethod
     async def from_wire(cls, reader: asyncio.StreamReader) -> OutputFrame | None:
-        raw_outer_header = await reader.readexactly(cls.OUTER_HEADER.size)
-        magic, version, inner_frame_size = cls.OUTER_HEADER.unpack(raw_outer_header)
+        try:
+            raw_outer_header = await reader.readexactly(cls.OUTER_HEADER.size)
+            magic, version, inner_frame_size = cls.OUTER_HEADER.unpack(raw_outer_header)
 
-        if magic != cls.MAGIC_PREFIX:
-            return None
-
-        raw_inner_frame = await reader.readexactly(inner_frame_size)
-        view = memoryview(raw_inner_frame)
-
-        status_code, entry_count = cls.INNER_HEADER.unpack_from(view)
-        
-        if (status := Status.from_status_code(status_code)) is None:
-            return None
-        
-        offset = cls.INNER_HEADER.size
-        entries = []
-
-        for _ in range(entry_count):
-            entry_size, = cls.ENTRY_PREFIX.unpack_from(view, offset)
-            offset += cls.ENTRY_PREFIX.size
-
-            if offset + entry_size > inner_frame_size:
+            if magic != cls.MAGIC_PREFIX:
                 return None
 
-            entries.append(str(view[offset:offset + entry_size], 'utf-8'))
-            offset += entry_size
+            raw_inner_frame = await reader.readexactly(inner_frame_size)
+            view = memoryview(raw_inner_frame)
 
-        if offset + cls.INNER_TRAILER.size != inner_frame_size:
+            status_code, entry_count = cls.INNER_HEADER.unpack_from(view)
+            
+            if (status := Status.from_status_code(status_code)) is None:
+                return None
+            
+            offset = cls.INNER_HEADER.size
+            entries = []
+
+            for _ in range(entry_count):
+                entry_size, = cls.ENTRY_PREFIX.unpack_from(view, offset)
+                offset += cls.ENTRY_PREFIX.size
+
+                if offset + entry_size > inner_frame_size:
+                    return None
+
+                entries.append(str(view[offset:offset + entry_size], 'utf-8'))
+                offset += entry_size
+
+            if offset + cls.INNER_TRAILER.size != inner_frame_size:
+                return None
+
+            computed_checksum = zlib.crc32(view[:offset])
+            expected_checksum, = cls.INNER_TRAILER.unpack_from(view, offset)
+
+            if computed_checksum != expected_checksum:
+                return None
+
+            return OutputFrame(version, status, entries)
+        except struct.error:
             return None
-
-        computed_checksum = zlib.crc32(view[:offset])
-        expected_checksum, = cls.INNER_TRAILER.unpack_from(view, offset)
-
-        if computed_checksum != expected_checksum:
-            return None
-
-        return OutputFrame(version, status, entries)
 
     def pack(self) -> bytes:
         frame_body = b''.join(self.ENTRY_PREFIX.pack(len(entry)) + entry for entry in map(str.encode, self.entries))

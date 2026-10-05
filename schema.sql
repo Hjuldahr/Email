@@ -92,12 +92,12 @@ CREATE TABLE message (
 
     folder ENUM(
         'INBOX',
-        'OUTBOX',
         'DRAFTS',
+        'OUTBOX',
         'SENT',
         'ARCHIVE',
-        'TRASH',
         'JUNK',
+        'TRASH',
         'MERC'
     ) NOT NULL,
 
@@ -109,7 +109,7 @@ CREATE TABLE message (
     sent_at DATETIME(6) NULL,
     read_at DATETIME(6) NULL,
 
-    -- When an OUTBOX message entered OUTBOX.
+    -- When an Outbox message entered Outbox.
     outbox_at DATETIME(6) NULL,
 
     -- Optional delivery scheduling/processing timestamp.

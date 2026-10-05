@@ -2,7 +2,7 @@ from __future__ import annotations
 import asyncio
 from enum import IntEnum
 import struct
-from typing import Iterator
+from typing import Iterator, Sequence
 import zlib
 
 class Operations(IntEnum):
@@ -77,7 +77,7 @@ class InputFrame:
     INNER_TRAILER = struct.Struct("!I")
     ARG_PREFIX = struct.Struct("!H")
 
-    def __init__(self, version: int, operation: Operations, arguments: list[str] | None):
+    def __init__(self, version: int, operation: Operations, arguments: Sequence[str] | None):
         self.version = version
         self.operation = operation
         self.arguments = arguments or []
@@ -108,43 +108,46 @@ class InputFrame:
 
     @classmethod
     async def from_wire(cls, reader: asyncio.StreamReader) -> InputFrame | None:
-        raw_outer_header = await reader.readexactly(cls.OUTER_HEADER.size)
-        magic, version, inner_frame_size = cls.OUTER_HEADER.unpack(raw_outer_header)
+        try:
+            raw_outer_header = await reader.readexactly(cls.OUTER_HEADER.size)
+            magic, version, inner_frame_size = cls.OUTER_HEADER.unpack(raw_outer_header)
 
-        if magic != cls.MAGIC_PREFIX:
-            return None
-
-        raw_inner_frame = await reader.readexactly(inner_frame_size)
-        view = memoryview(raw_inner_frame)
-
-        op_code, arg_count = cls.INNER_HEADER.unpack_from(view)
-        
-        if (operation := Operations.from_op_code(op_code)) is None:
-            return None
-        
-        offset = cls.INNER_HEADER.size
-        args = []
-
-        for _ in range(arg_count):
-            arg_size, = cls.ARG_PREFIX.unpack_from(view, offset)
-            offset += cls.ARG_PREFIX.size
-
-            if offset + arg_size > inner_frame_size:
+            if magic != cls.MAGIC_PREFIX:
                 return None
 
-            args.append(str(view[offset:offset + arg_size], 'utf-8'))
-            offset += arg_size
+            raw_inner_frame = await reader.readexactly(inner_frame_size)
+            view = memoryview(raw_inner_frame)
 
-        if offset + cls.INNER_TRAILER.size != inner_frame_size:
+            op_code, arg_count = cls.INNER_HEADER.unpack_from(view)
+            
+            if (operation := Operations.from_op_code(op_code)) is None:
+                return None
+            
+            offset = cls.INNER_HEADER.size
+            args = []
+
+            for _ in range(arg_count):
+                arg_size, = cls.ARG_PREFIX.unpack_from(view, offset)
+                offset += cls.ARG_PREFIX.size
+
+                if offset + arg_size > inner_frame_size:
+                    return None
+
+                args.append(str(view[offset:offset + arg_size], 'utf-8'))
+                offset += arg_size
+
+            if offset + cls.INNER_TRAILER.size != inner_frame_size:
+                return None
+
+            computed_checksum = zlib.crc32(view[:offset])
+            expected_checksum, = cls.INNER_TRAILER.unpack_from(view, offset)
+
+            if computed_checksum != expected_checksum:
+                return None
+
+            return InputFrame(version, operation, args)
+        except struct.error:
             return None
-
-        computed_checksum = zlib.crc32(view[:offset])
-        expected_checksum, = cls.INNER_TRAILER.unpack_from(view, offset)
-
-        if computed_checksum != expected_checksum:
-            return None
-
-        return InputFrame(version, operation, args)
     
     def pack(self) -> bytes:
         frame_body = b''.join(self.ARG_PREFIX.pack(len(arg)) + arg for arg in map(str.encode, self.arguments))

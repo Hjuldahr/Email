@@ -3,9 +3,11 @@ import asyncio
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import IntEnum, StrEnum, auto
+import struct
 import aiomysql
 
 from input_frame import InputFrame
+from output_frame import OutputFrame, Status
 
 @dataclass(slots=True)
 class User:
@@ -14,32 +16,19 @@ class User:
     created_on: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     last_accessed_on: datetime | None = None
 
-@dataclass(slots=True)
-class TransientUser:
-    username: str
-    password_hash: bytes | None = None
-    created_on: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
-
 class Folder(StrEnum):
-    INBOX = 'Inbox'
-    DRAFT = 'Draft'
-    OUTBOX = 'Outbox'
-    SENT = 'Sent'
-    ARCHIVE = 'Archive'
-    
-    SPAM = 'Spam'
-    JUNK = 'Junk'
-    ASAP = 'ASAP'
-    TODO = 'ToDo'
-    TBC = 'TBC'
-    TBD = 'TBD'
-    MEMO = 'Memo'
-    MISC = 'Misc'
+    INBOX = 'INBOX'
+    DRAFTS = 'DRAFTS'
+    OUTBOX = 'OUTBOX'
+    SENT = 'SENT'
+    ARCHIVE = 'ARCHIVE'
+    JUNK = 'JUNK'
+    TRASH = 'TRASH'
+    MERC = 'MERC'
     
     @classmethod
-    def from_string(cls, value: str, default: Folder | None=None) -> Folder | None:
-        clean = value.strip().upper()
-        return next((member for member in cls if member.name == clean), default)
+    def from_string(cls, name: str, default: Folder | None=None) -> Folder | None:
+        return cls._member_map_.get(name.strip(), default)
     
 class SessionMode(IntEnum):
     CONNECTED = auto()
@@ -50,34 +39,23 @@ class SessionMode(IntEnum):
 
 @dataclass(slots=True)
 class SessionCoordinator:
+    version: int
     reader: asyncio.StreamReader
     writer: asyncio.StreamWriter
     pool: aiomysql.Pool
     conn: aiomysql.connection.Connection
     user: User | None = None
-    trans_user: TransientUser | None = None
     cwd: Folder | None = None
     mode: SessionMode = SessionMode.CONNECTED
     input_frame: InputFrame | None = None
-    output_frame: InputFrame | None = None
 
     def purge_auth(self):
-        self.trans_user = None
         self.user = None
         self.cwd = None
         self.mode = SessionMode.CONNECTED
 
-    def purge_join(self):
-        self.trans_user = None
-        if self.user is None:
-            self.cwd = None
-            self.mode = SessionMode.CONNECTED
-        else:
-            self.mode = SessionMode.AUTHENTICATED
-
-    def promote_join(self, user_id: int):
-        self.user = User(user_id, self.trans_user.username, self.trans_user.created_on)
-        self.trans_user = None
+    def open_auth(self, user: User):
+        self.user = user
         self.cwd = Folder.INBOX
         self.mode = SessionMode.AUTHENTICATED
 
@@ -94,6 +72,5 @@ class SessionCoordinator:
     async def read(self):
         self.input_frame = await InputFrame.from_wire(self.reader)
         
-    async def write(self):
-        await self.output_frame.to_wire(self.writer)
-        self.output_frame = None
+    async def write(self, status: Status, *entries: str):
+        await OutputFrame(self.version, status, entries).to_wire(self.writer)

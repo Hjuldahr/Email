@@ -304,7 +304,10 @@ If the argument is omitted, the current state is returned.
 Opcode: 0x000  
 PING
 
-Refreshes the connection TTL and returns `OK`.
+Returns only an output frame header (Magic Bytes, Version).
+
+While the server returns a stripped-down frame, the client still needs to send a normal InputFrame to make decoding reliable. 
+Otherwise, a malformed bodiless input frame can appear as an inbound ping.
 
 **Requirement:** CONNECTED
 
