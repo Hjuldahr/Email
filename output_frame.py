@@ -1,25 +1,32 @@
 from __future__ import annotations
+import asyncio
 from enum import IntEnum
 import struct
 from typing import Iterator
 import zlib
 
 class Status(IntEnum):
-    PING = 0
+    SYNC = 0x0
+    OK = 0x1
+    INFO = 0x2
+    WARN = 0x3
+    ERR = 0x4
     
     @classmethod
     def from_status_code(cls, status_code: int) -> Status | None:
-        return next(member for member in cls if member.value == status_code)
+        return cls._value2member_map_.get(status_code, None)
     
 class OutputFrame:
-    __slots__ = ('status', 'entries')
+    __slots__ = ('version', 'status', 'entries')
 
-    MAGIC_PREFIX = b'TNCSLRP' # Using new prefix, to differentiate from input frames
-    FRAME_HEADER = struct.Struct("!7sHB")
-    FRAME_TRAILER = struct.Struct("!I")
-    ENTRY_HEADER = struct.Struct("!I")
+    MAGIC_PREFIX = b'TNCSLRP' # Differentiate from input frames
+    OUTER_HEADER = struct.Struct("!7sBI")
+    INNER_HEADER = struct.Struct("!BH")
+    INNER_TRAILER = struct.Struct("!I")
+    ENTRY_PREFIX = struct.Struct("!H")
 
-    def __init__(self, status: Status, entries: list[str] | None):
+    def __init__(self, version: int, status: Status, entries: list[str] | None):
+        self.version = version
         self.status = status
         self.entries = entries or []
 
@@ -30,10 +37,10 @@ class OutputFrame:
         return f'[{self.status.name}: {", ".join(self.entries)}]'
 
     def __repr__(self) -> str:
-        return f'OutputFrame(status={self.status!r}, entries={self.entries!r})'
+        return f'OutputFrame(version={self.version}, status={self.status!r}, entries={self.entries!r})'
 
     def __bytes__(self) -> bytes:
-        return self.serialize()
+        return self.pack()
 
     def __iter__(self) -> Iterator[Status | str]:
         yield self.status
@@ -45,59 +52,59 @@ class OutputFrame:
     def __eq__(self, value: object) -> bool:
         if not isinstance(value, OutputFrame):
             return NotImplemented
-        return self.status == value.status and self.entries == value.entries
-    
-    def __getitem__(self, idx: int) -> Status | str:
-        if idx < 0:
-            idx += len(self)
-        if idx == 0:
-            return self.status
-        return self.entries[idx - 1]
-
-    def __setitem__(self, idx: int, value: Status | str) -> None:
-        if idx < 0:
-            idx += len(self)
-        if idx == 0:
-            self.status = value
-        else:
-            self.entries[idx - 1] = value
+        return self.version == value.version and self.status == value.status and self.entries == value.entries
 
     @classmethod
-    def deserialize(cls, data: bytes, initial_offset: int = 0) -> OutputFrame | None:
-        view = memoryview(data)
-        entries = []
-        offset = initial_offset
+    async def from_wire(cls, reader: asyncio.StreamReader) -> OutputFrame | None:
+        raw_outer_header = await reader.readexactly(cls.OUTER_HEADER.size)
+        magic, version, inner_frame_size = cls.OUTER_HEADER.unpack(raw_outer_header)
 
-        prefix, status_code, entry_count = cls.FRAME_HEADER.unpack_from(view, offset)
-        if prefix != cls.MAGIC_PREFIX:
+        if magic != cls.MAGIC_PREFIX:
             return None
-        offset += cls.FRAME_HEADER.size
+
+        raw_inner_frame = await reader.readexactly(inner_frame_size)
+        view = memoryview(raw_inner_frame)
+
+        status_code, entry_count = cls.INNER_HEADER.unpack_from(view)
+        
+        if (status := Status.from_status_code(status_code)) is None:
+            return None
+        
+        offset = cls.INNER_HEADER.size
+        entries = []
 
         for _ in range(entry_count):
-            entry_size, = cls.ENTRY_HEADER.unpack_from(view, offset)
-            offset += cls.ENTRY_HEADER.size
+            entry_size, = cls.ENTRY_PREFIX.unpack_from(view, offset)
+            offset += cls.ENTRY_PREFIX.size
+
+            if offset + entry_size > inner_frame_size:
+                return None
 
             entries.append(str(view[offset:offset + entry_size], 'utf-8'))
             offset += entry_size
 
-        computed_checksum = zlib.crc32(view[initial_offset:offset])
+        if offset + cls.INNER_TRAILER.size != inner_frame_size:
+            return None
 
-        expected_checksum, = cls.FRAME_TRAILER.unpack_from(view, offset)
+        computed_checksum = zlib.crc32(view[:offset])
+        expected_checksum, = cls.INNER_TRAILER.unpack_from(view, offset)
 
         if computed_checksum != expected_checksum:
             return None
 
-        return cls(Status.from_status_code(status_code), entries)
+        return OutputFrame(version, status, entries)
 
-    def serialize(self) -> bytes:
-        header = self.FRAME_HEADER.pack(self.MAGIC_PREFIX, self.status.value, len(self.entries))
+    def pack(self) -> bytes:
+        frame_body = b''.join(self.ENTRY_PREFIX.pack(len(entry)) + entry for entry in map(str.encode, self.entries))
+                
+        inner_frame_size = self.INNER_HEADER.size + len(frame_body) + self.INNER_TRAILER.size
+        
+        outer_header = self.OUTER_HEADER.pack(self.MAGIC_PREFIX, self.version, inner_frame_size)
+        inner_header = self.INNER_HEADER.pack(self.status.value, len(self.entries))
+        inner_trailer = self.INNER_TRAILER.pack(zlib.crc32(inner_header + frame_body))
+        
+        return outer_header + inner_header + frame_body + inner_trailer
 
-        body = bytearray()
-        for entry in self.entries:
-            entry_bytes = entry.encode('utf-8')
-            body.extend(self.ENTRY_HEADER.pack(len(entry_bytes)))
-            body.extend(entry_bytes)
-
-        payload = header + bytes(body)
-            
-        return payload + self.FRAME_TRAILER.pack(zlib.crc32(payload))
+    async def to_wire(self, writer: asyncio.StreamWriter) -> None:
+        writer.write(self.pack())
+        await writer.drain()

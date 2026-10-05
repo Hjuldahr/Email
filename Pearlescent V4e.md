@@ -28,24 +28,31 @@ A server MAY expose additional commands or capabilities through capability negot
 
 ## **2.1 Input Frames**
 
-PRLSCNT\[H: OP CODE\]\[B: ARG COUNT\](\[I: ARG SIZE\]\[Raw: ARG\]...)\[I: CHECKSUM\]
+PRLSCNT\[B : PROTO VERSION\]\[I : FRAME SIZE\]\[H : OP CODE\]\[B : ARG COUNT\](\[H : ARG SIZE\]\[Raw : ARG\]...)\[I: CHECKSUM\]
 
 Each input frame contains:
 
 1. The `PRLSCNT` magic prefix.  
-2. An operation code.  
-3. The number of arguments.  
-4. Zero or more length-prefixed arguments.  
-5. A checksum.
+2. A protocol version number  
+3. The inner frame size in bytes (op code, arg count, arg sequence, checksum).  
+4. An operation code.  
+5. The number of arguments.  
+6. Zero or more length-prefixed arguments.  
+7. A checksum calculated from the inner frame (op code, arg count, arg sequence).
 
 ## **2.2 Output Frames**
 
-TNCSLRP\[H: STATUS CODE\]\[I: ENTRY COUNT\](\[I: ENTRY SIZE\]\[Raw: ENTRY\]...)\[I: CHECKSUM\]
+TNCSLRP\[B : PROTO VERSION\]\[I : FRAME SIZE\]\[B : STATUS\]\[H : ENTRY COUNT\](\[H : ENTRY SIZE\]\[Raw : ENTRY\]...)\[I: CHECKSUM\]
 
 Each output frame contains:
 
 1. The `TNCSLRP` magic prefix, to differentiate from inbound traffic.  
-2. A status code.  
+2. A status code:   
+   * 0 \= SYNC  
+   * 1 \= OK  
+   * 2 \= INFO  
+   * 3 \= WARN  
+   * 4 \= ERROR  
 3. The number of entries.  
 4. Zero or more length-prefixed result entries.  
 5. A checksum.
@@ -377,7 +384,7 @@ Messages created with `DRAFT` default to `SEEN ON`.
 ## **6.5 LIST**
 
 Opcode: 0x400  
-LIST \<Folder Name\> \[\<Email Filter\>\]
+LIST \<Folder Name\> \[\<Email Filter\>\] \[\<Range\>\]
 
 Returns messages in the specified folder matching the supplied filter.
 
@@ -1067,3 +1074,4 @@ The following are intentionally outside the command semantics of this document a
 * Error/status code definitions
 
 These details MUST NOT be inferred from implementation behaviour when a transport specification is available.
+

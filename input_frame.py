@@ -1,4 +1,5 @@
 from __future__ import annotations
+import asyncio
 from enum import IntEnum
 import struct
 from typing import Iterator
@@ -64,18 +65,20 @@ class Operations(IntEnum):
     STATUS = 0x300
     
     @classmethod
-    def from_opcode(cls, opcode: int) -> Operations | None:
-        return next(member for member in cls if member.value == opcode)
-
+    def from_op_code(cls, status_code: int) -> Operations | None:
+        return cls._value2member_map_.get(status_code, None)
+    
 class InputFrame:
-    __slots__ = ('operation', 'arguments')
+    __slots__ = ('version', 'operation', 'arguments')
 
     MAGIC_PREFIX = b'PRLSCNT'
-    FRAME_HEADER = struct.Struct("!7sBB")
-    FRAME_TRAILER = struct.Struct("!I")
-    ARG_HEADER = struct.Struct("!I")
+    OUTER_HEADER = struct.Struct("!7sBI")
+    INNER_HEADER = struct.Struct("!HB")
+    INNER_TRAILER = struct.Struct("!I")
+    ARG_PREFIX = struct.Struct("!H")
 
-    def __init__(self, operation: Operations, arguments: list[str] | None):
+    def __init__(self, version: int, operation: Operations, arguments: list[str] | None):
+        self.version = version
         self.operation = operation
         self.arguments = arguments or []
 
@@ -86,10 +89,10 @@ class InputFrame:
         return f'[{self.operation.name}: {", ".join(self.arguments)}]'
 
     def __repr__(self) -> str:
-        return f'InputFrame(operation={self.operation!r}, arguments={self.arguments!r})'
+        return f'InputFrame(version={self.version}, operation={self.operation!r}, arguments={self.arguments!r})'
 
     def __bytes__(self) -> bytes:
-        return self.serialize()
+        return self.pack()
 
     def __iter__(self) -> Iterator[Operations | str]:
         yield self.operation
@@ -101,59 +104,59 @@ class InputFrame:
     def __eq__(self, value: object) -> bool:
         if not isinstance(value, InputFrame):
             return NotImplemented
-        return self.operation == value.operation and self.arguments == value.arguments
-
-    def __getitem__(self, idx: int) -> Operations | str:
-        if idx < 0:
-            idx += len(self)
-        if idx == 0:
-            return self.operation
-        return self.arguments[idx - 1]
-
-    def __setitem__(self, idx: int, value: Operations | str) -> None:
-        if idx < 0:
-            idx += len(self)
-        if idx == 0:
-            self.operation = value
-        else:
-            self.arguments[idx - 1] = value
+        return self.version == value.version and self.operation == value.operation and self.arguments == value.arguments
 
     @classmethod
-    def deserialize(cls, data: bytes, initial_offset: int = 0) -> InputFrame | None:
-        view = memoryview(data)
-        args = []
-        offset = initial_offset
+    async def from_wire(cls, reader: asyncio.StreamReader) -> InputFrame | None:
+        raw_outer_header = await reader.readexactly(cls.OUTER_HEADER.size)
+        magic, version, inner_frame_size = cls.OUTER_HEADER.unpack(raw_outer_header)
 
-        prefix, op_code, arg_count = cls.FRAME_HEADER.unpack_from(view, offset)
-        if prefix != cls.MAGIC_PREFIX:
+        if magic != cls.MAGIC_PREFIX:
             return None
-        offset += cls.FRAME_HEADER.size
+
+        raw_inner_frame = await reader.readexactly(inner_frame_size)
+        view = memoryview(raw_inner_frame)
+
+        op_code, arg_count = cls.INNER_HEADER.unpack_from(view)
         
+        if (operation := Operations.from_op_code(op_code)) is None:
+            return None
+        
+        offset = cls.INNER_HEADER.size
+        args = []
+
         for _ in range(arg_count):
-            arg_size, = cls.ARG_HEADER.unpack_from(view, offset)
-            offset += cls.ARG_HEADER.size
+            arg_size, = cls.ARG_PREFIX.unpack_from(view, offset)
+            offset += cls.ARG_PREFIX.size
+
+            if offset + arg_size > inner_frame_size:
+                return None
 
             args.append(str(view[offset:offset + arg_size], 'utf-8'))
             offset += arg_size
 
-        computed_checksum = zlib.crc32(view[initial_offset:offset])
+        if offset + cls.INNER_TRAILER.size != inner_frame_size:
+            return None
 
-        expected_checksum, = cls.FRAME_TRAILER.unpack_from(view, offset)
+        computed_checksum = zlib.crc32(view[:offset])
+        expected_checksum, = cls.INNER_TRAILER.unpack_from(view, offset)
 
         if computed_checksum != expected_checksum:
             return None
 
-        return InputFrame(Operations.from_opcode(op_code), args)
-
-    def serialize(self) -> bytes:
-        header = self.FRAME_HEADER.pack(self.MAGIC_PREFIX, self.user_uid.bytes, self.operation.value, len(self.arguments))
-
-        body = bytearray()
-        for arg in self.arguments:
-            arg_bytes = arg.encode('utf-8')
-            body.extend(self.ARG_HEADER.pack(len(arg_bytes)))
-            body.extend(arg_bytes)
-
-        payload = header + bytes(body)
-            
-        return payload + self.FRAME_TRAILER.pack(zlib.crc32(payload))
+        return InputFrame(version, operation, args)
+    
+    def pack(self) -> bytes:
+        frame_body = b''.join(self.ARG_PREFIX.pack(len(arg)) + arg for arg in map(str.encode, self.arguments))
+                
+        inner_frame_size = self.INNER_HEADER.size + len(frame_body) + self.INNER_TRAILER.size
+        
+        outer_header = self.OUTER_HEADER.pack(self.MAGIC_PREFIX, self.version, inner_frame_size)
+        inner_header = self.INNER_HEADER.pack(self.operation.value, len(self.arguments))
+        inner_trailer = self.INNER_TRAILER.pack(zlib.crc32(inner_header + frame_body))
+        
+        return outer_header + inner_header + frame_body + inner_trailer
+    
+    async def to_wire(self, writer: asyncio.StreamWriter) -> None:
+        writer.writelines(self.pack())
+        await writer.drain()

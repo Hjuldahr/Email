@@ -2,8 +2,8 @@ import asyncio
 from enum import Enum
 import uuid
 import bcrypt
-from old.database import Database
-from old.other import Context, Folder, Mode, TransientUser, User
+from database import Database
+from other import Context, Folder, Mode, TransientUser, User
 
 class Status(Enum):
     OK = "+OK"

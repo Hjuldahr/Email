@@ -5,6 +5,8 @@ from datetime import datetime, timezone
 from enum import IntEnum, StrEnum, auto
 import aiomysql
 
+from input_frame import InputFrame
+
 @dataclass(slots=True)
 class User:
     user_id: int
@@ -39,15 +41,15 @@ class Folder(StrEnum):
         clean = value.strip().upper()
         return next((member for member in cls if member.name == clean), default)
     
-class Mode(IntEnum):
-    WAITING = auto()
+class SessionMode(IntEnum):
+    CONNECTED = auto()
     AUTHENTICATED = auto()
     VALIDATING_JOINING = auto()
     MESSAGE_VIEWING = auto()
     MESSAGE_COMPOSING = auto()
 
 @dataclass(slots=True)
-class Context:
+class SessionCoordinator:
     reader: asyncio.StreamReader
     writer: asyncio.StreamWriter
     pool: aiomysql.Pool
@@ -55,27 +57,29 @@ class Context:
     user: User | None = None
     trans_user: TransientUser | None = None
     cwd: Folder | None = None
-    mode: Mode = Mode.WAITING
+    mode: SessionMode = SessionMode.CONNECTED
+    input_frame: InputFrame | None = None
+    output_frame: InputFrame | None = None
 
     def purge_auth(self):
         self.trans_user = None
         self.user = None
         self.cwd = None
-        self.mode = Mode.WAITING
+        self.mode = SessionMode.CONNECTED
 
     def purge_join(self):
         self.trans_user = None
         if self.user is None:
             self.cwd = None
-            self.mode = Mode.WAITING
+            self.mode = SessionMode.CONNECTED
         else:
-            self.mode = Mode.AUTHENTICATED
+            self.mode = SessionMode.AUTHENTICATED
 
     def promote_join(self, user_id: int):
         self.user = User(user_id, self.trans_user.username, self.trans_user.created_on)
         self.trans_user = None
         self.cwd = Folder.INBOX
-        self.mode = Mode.AUTHENTICATED
+        self.mode = SessionMode.AUTHENTICATED
 
     async def cleanup(self):
         try:
@@ -86,3 +90,10 @@ class Context:
                 self.pool.release(self.conn)
             except Exception:
                 pass
+            
+    async def read(self):
+        self.input_frame = await InputFrame.from_wire(self.reader)
+        
+    async def write(self):
+        await self.output_frame.to_wire(self.writer)
+        self.output_frame = None
