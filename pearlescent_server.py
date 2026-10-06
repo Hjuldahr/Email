@@ -28,6 +28,17 @@ class PearlescentServer:
     NAMESPACE = uuid.UUID("99b00d33-11b3-4f37-bd46-18a624fcfe74")
     
     TIMEOUT = 300
+    
+    DESTINATION_TRANSITIONS = {
+        'OUTBOX': {'DRAFTS', 'TRASH', 'ARCHIVE'},
+        'DRAFTS': {'OUTBOX', 'TRASH', 'ARCHIVE'},
+        'MERC': {'INBOX', 'JUNK', 'TRASH', 'ARCHIVE'},
+        'INBOX': {'JUNK', 'TRASH', 'ARCHIVE'},
+        'SENT': {'TRASH', 'ARCHIVE'},
+        'JUNK': {'INBOX', 'ARCHIVE', 'TRASH'},
+        'ARCHIVE': {'INBOX', 'JUNK', 'SENT', 'DRAFTS', 'TRASH'},
+        'TRASH': {'INBOX', 'JUNK', 'SENT', 'DRAFTS'},
+    }
 
     def __init__(self):
         self.db = Database()
@@ -305,6 +316,24 @@ class PearlescentServer:
                     case Operations.ADDR_REQ:
                         await self.request_address_op(ses)
                         
+                    case Operations.ADDR:
+                        await self.address_op(ses)
+                        
+                    case Operations.LIST_ADDR:
+                        await self.list_address_op(ses)
+                        
+                    case Operations.VIEWONLY:
+                        await self.viewonly_op(ses)
+                        
+                    case Operations.NOTIFY:
+                        await self.notify_op(ses)
+                        
+                    case Operations.DETACH:
+                        await self.detach_op(ses)  
+                        
+                    case Operations.MOVE:
+                        await self.move_op(ses)  
+                        
                     case _:
                         await self._write_raw(writer, self.out_invalid_cmd)
 
@@ -389,7 +418,7 @@ class PearlescentServer:
             f"Last login at {last_login_at}."
         )
         
-    async def logout_op(self, ses: SessionCoordinator) -> None:
+    async def logout_op(self, ses: SessionCoordinator, suppress_output: bool = False) -> None:
         if ses.user is not None:
             await ses.write(Status.OK, "Logout successful.")
             ses.purge_auth()
@@ -407,6 +436,9 @@ class PearlescentServer:
         ses = None
         
     async def request_address_op(self, ses: SessionCoordinator) -> None:
+        if not await ses.auth_check() or not await ses.modify_check():
+            return
+        
         address, = ses.input_frame.arguments
 
         if not (16 <= len(address) <= 254):
@@ -455,6 +487,9 @@ class PearlescentServer:
         await ses.write(Status.OK, "Address has been assigned to your account.")
         
     async def release_address_op(self, ses: SessionCoordinator) -> None:
+        if not await ses.auth_check() or not await ses.modify_check():
+            return
+        
         address, = ses.input_frame.arguments
 
         async with ses.conn.cursor() as cursor:
@@ -481,6 +516,9 @@ class PearlescentServer:
         await ses.write(Status.OK, "Address has been released from your account.")
         
     async def address_op(self, ses: SessionCoordinator) -> None:
+        if not await ses.auth_check() or not await ses.modify_check():
+            return
+        
         args = ses.input_frame.arguments
 
         async with ses.conn.cursor() as cursor:
@@ -516,3 +554,123 @@ class PearlescentServer:
             return
 
         await ses.write(Status.OK, "Enabled address" if enabled else "Disabled address")
+        
+    async def list_address_op(self, ses: SessionCoordinator) -> None:
+        if not await ses.auth_check():
+            return
+        
+        async with ses.conn.cursor() as cursor:
+            await cursor.execute(
+                """SELECT a.address, a.enabled, COALESCE(SUM(mr.current_folder = 'INBOX' AND NOT mr.seen), 0) AS unread_count FROM address AS a
+                LEFT JOIN message_recipient AS mr ON a.account_id = mr.account_id AND a.address = mr.address
+                WHERE a.account_id = %s
+                GROUP BY a.address, a.enabled;""",
+                (ses.user.user_id,),
+            )
+            rows = await cursor.fetchall()
+            
+            if not rows:
+                await ses.write(Status.WARN, f'You have zero addresses registered.')
+                return
+                
+            await ses.write(Status.OK, f'You have {len(rows)} addresses registered.', *[f'{row[0]} {"ON" if row[1] else "OFF"} {row[2]}' for row in rows])
+            
+    async def viewonly_op(self, ses: SessionCoordinator) -> None:
+        args = ses.input_frame.arguments
+
+        if len(args) == 0:
+            await ses.write(Status.OK, "Viewonly mode is ON" if ses.view_only else "Viewonly mode is OFF")
+            return
+
+        enabled, = args
+        ses.view_only = enabled == "ON"
+
+        await ses.write(Status.OK, "Viewonly mode set to ON" if ses.view_only else "Viewonly mode set to OFF")
+        
+    async def notify_op(self, ses: SessionCoordinator) -> None:
+        if not await ses.modify_check():
+            return
+        
+        args = ses.input_frame.arguments
+
+        if len(args) == 0:
+            await ses.write(Status.OK, "Notify mode is ON" if ses.view_only else "Notify mode is OFF")
+            return
+
+        enabled, = args
+        ses.notify = enabled == "ON"
+
+        await ses.write(Status.OK, "Notify mode is set to ON" if ses.notify else "Notify mode is set to OFF")
+        
+    async def detach_op(self, ses: SessionCoordinator) -> None:
+        ...
+        
+    async def move_op(self, ses: SessionCoordinator) -> None:
+        if not await ses.auth_check() or not await ses.modify_check():
+            return
+
+        destination_folder, *message_uids = ses.input_frame.arguments
+        message_uids = list(map(int, message_uids))
+
+        placeholders = ', '.join(['%s'] * len(message_uids))
+
+        async with ses.conn.cursor() as cursor:
+            # Check folder regardless of if you were sent it or received it.
+            await cursor.execute(
+                f"""SELECT m.message_id, m.current_folder, mr.current_folder FROM message AS m
+                LEFT JOIN message_recipient AS mr ON m.message_id = mr.message_id AND mr.account_id = %s
+                WHERE (m.account_id = %s OR mr.account_id IS NOT NULL) AND m.message_id IN ({placeholders});""",
+                (ses.user.user_id, ses.user.user_id, *message_uids),
+            )
+
+            rows = await cursor.fetchall()
+
+            if not rows:
+                await ses.write(Status.ERR, "Message not found")
+                return
+
+            message_ids = []
+            recipient_ids = []
+
+            for message_id, sender_folder, recipient_folder in rows:
+                if recipient_folder is not None:
+                    current_folder = recipient_folder
+                else:
+                    current_folder = sender_folder
+
+                if current_folder == destination_folder:
+                    continue
+
+                if destination_folder not in self.DESTINATION_TRANSITIONS[current_folder]:
+                    continue
+
+                if recipient_folder is not None:
+                    recipient_ids.append(message_id)
+                else:
+                    message_ids.append(message_id)
+
+            if not message_ids and not recipient_ids:
+                await ses.write(Status.ERR, "No messages can be moved")
+                return
+
+            if message_ids:
+                placeholders = ', '.join(['%s'] * len(message_ids))
+                await cursor.execute(
+                    f"""UPDATE message SET current_folder = %s
+                    WHERE message_id IN ({placeholders}) AND account_id = %s;""",
+                    (destination_folder, *message_ids, ses.user.user_id),
+                )
+
+            if recipient_ids:
+                placeholders = ', '.join(['%s'] * len(recipient_ids))
+                await cursor.execute(
+                    f"""UPDATE message_recipient SET current_folder = %s
+                    WHERE message_id IN ({placeholders}) AND account_id = %s;""",
+                    (destination_folder, *recipient_ids, ses.user.user_id),
+                )
+
+            await ses.conn.commit()
+
+        await ses.write(Status.OK, f"Moved {len(message_ids) + len(recipient_ids)} message(s) to {destination_folder}")
+        
+    

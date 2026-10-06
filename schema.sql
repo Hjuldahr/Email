@@ -5,406 +5,197 @@ CREATE DATABASE pearlescence
 
 USE pearlescence;
 
--- ============================================================
--- Accounts
--- ============================================================
-
 CREATE TABLE account (
-    account_id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
-    username VARCHAR(254) NOT NULL UNIQUE,
-    password_hash VARBINARY(512) NOT NULL,
-    created_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
+    account_id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY, 
+    username VARCHAR(254) NOT NULL UNIQUE, 
+    password_hash VARBINARY(512) NOT NULL, 
+    created_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6), 
     last_login_at DATETIME(6) NULL
 );
 
-
--- ============================================================
--- Addresses
---
--- The address string is the externally meaningful identity.
--- Messages therefore do NOT reference address_id.
--- ============================================================
-
 CREATE TABLE address (
-    address_id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
-    account_id BIGINT UNSIGNED NOT NULL,
-    address VARCHAR(254) NOT NULL,
-    enabled BOOLEAN NOT NULL DEFAULT TRUE,
-    registered_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
-
-    UNIQUE KEY uq_address (address),
-    KEY ix_address_account (account_id),
-
-    CONSTRAINT fk_address_account
-        FOREIGN KEY (account_id)
-        REFERENCES account(account_id)
-        ON DELETE CASCADE
+    address_id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY, 
+    account_id BIGINT UNSIGNED NOT NULL, 
+    address VARCHAR(254) NOT NULL UNIQUE, 
+    enabled BOOLEAN NOT NULL DEFAULT TRUE, 
+    registered_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6), 
+    FOREIGN KEY (account_id) REFERENCES account(account_id) ON DELETE CASCADE 
 );
-
-
--- ============================================================
--- Released-address reserve pool
---
--- Kept separately from address because a released address no
--- longer belongs to the account.
--- ============================================================
 
 CREATE TABLE address_reservation (
-    reservation_id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
-    address VARCHAR(254) NOT NULL,
-    account_id BIGINT UNSIGNED NOT NULL,
-    released_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
-    reserved_until DATETIME(6) NOT NULL DEFAULT (CURRENT_TIMESTAMP(6) + INTERVAL 1 WEEK),
-
-    UNIQUE KEY uq_reserved_address (address),
-    KEY ix_reservation_account (account_id),
-    KEY ix_reservation_expiry (reserved_until),
-
-    CONSTRAINT fk_reservation_account
-        FOREIGN KEY (account_id)
-        REFERENCES account(account_id)
-        ON DELETE CASCADE
+    reservation_id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY, 
+    address VARCHAR(254) NOT NULL UNIQUE, 
+    account_id BIGINT UNSIGNED NULL, 
+    released_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6), 
+    reserved_until DATETIME(6) NOT NULL DEFAULT (CURRENT_TIMESTAMP(6) + INTERVAL 1 WEEK), 
+    FOREIGN KEY (account_id) REFERENCES account(account_id) ON DELETE SET NULL
 );
-
-
--- ============================================================
--- Messages
---
--- sender_address and all recipient addresses are stored as
--- strings rather than references to address.address_id.
---
--- This permits messages originating from external SMTP systems
--- and permits POP/IMAP compatibility without requiring the
--- external address to exist in the Pearlescence address table.
--- ============================================================
-
-CREATE TABLE message (
-    message_id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
-
-    -- Protocol-visible identifiers.
-    message_uid BINARY(16) NOT NULL UNIQUE,
-    thread_uid BINARY(16) NULL,
-
-    sender_address VARCHAR(254) NOT NULL,
-
-    subject VARCHAR(998) NOT NULL,
-    body LONGBLOB NOT NULL,
-
-    current_folder ENUM(
-        'INBOX',
-        'DRAFTS',
-        'OUTBOX',
-        'SENT',
-        'ARCHIVE',
-        'JUNK',
-        'TRASH',
-        'MERC'
-    ) NOT NULL,
-
-    original_folder ENUM(
-        'INBOX',
-        'DRAFTS',
-        'OUTBOX',
-        'SENT',
-        'ARCHIVE',
-        'JUNK',
-        'TRASH',
-        'MERC'
-    ) NULL,
-
-    flagged BOOLEAN NOT NULL DEFAULT FALSE,
-    seen BOOLEAN NOT NULL DEFAULT TRUE,
-
-    created_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
-    updated_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6) ON UPDATE CURRENT_TIMESTAMP(6),
-    received_at DATETIME(6) NULL,
-    sent_at DATETIME(6) NULL,
-    read_at DATETIME(6) NULL,
-
-    -- When an Outbox message entered Outbox.
-    outbox_at DATETIME(6) NULL,
-
-    -- Optional delivery scheduling/processing timestamp.
-    send_after DATETIME(6) NULL,
-
-    KEY ix_message_folder_time (folder, sent_at, message_id),
-    KEY ix_message_thread (thread_uid),
-    KEY ix_message_sender (sender_address),
-    KEY ix_message_seen (folder, seen),
-    KEY ix_message_flagged (folder, flagged)
-);
-
-
--- ============================================================
--- Message recipients
---
--- Addresses are deliberately stored as strings.
--- recipient_type corresponds to TO / CC / BCC.
--- ============================================================
-
-CREATE TABLE message_recipient (
-    recipient_id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
-    message_id BIGINT UNSIGNED NOT NULL,
-
-    recipient_type ENUM('TO', 'CC', 'BCC') NOT NULL,
-    address VARCHAR(254) NOT NULL,
-    recipient_order INT UNSIGNED NOT NULL DEFAULT 0,
-
-    KEY ix_recipient_message (message_id, recipient_type, recipient_order),
-    KEY ix_recipient_address (address),
-
-    CONSTRAINT fk_recipient_message
-        FOREIGN KEY (message_id)
-        REFERENCES message(message_id)
-        ON DELETE CASCADE
-);
-
-
--- ============================================================
--- Message tags
--- ============================================================
-
-CREATE TABLE tag (
-    tag_id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
-    account_id BIGINT UNSIGNED NOT NULL,
-    name VARCHAR(255) NOT NULL,
-    created_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
-
-    UNIQUE KEY uq_tag_account_name (account_id, name),
-
-    CONSTRAINT fk_tag_account
-        FOREIGN KEY (account_id)
-        REFERENCES account(account_id)
-        ON DELETE CASCADE
-);
-
-
-CREATE TABLE message_tag (
-    message_id BIGINT UNSIGNED NOT NULL,
-    tag_id BIGINT UNSIGNED NOT NULL,
-
-    PRIMARY KEY (message_id, tag_id),
-
-    CONSTRAINT fk_message_tag_message
-        FOREIGN KEY (message_id)
-        REFERENCES message(message_id)
-        ON DELETE CASCADE,
-
-    CONSTRAINT fk_message_tag_tag
-        FOREIGN KEY (tag_id)
-        REFERENCES tag(tag_id)
-        ON DELETE CASCADE
-);
-
-
--- ============================================================
--- Attachments
--- ============================================================
-
-CREATE TABLE attachment (
-    attachment_id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
-    message_id BIGINT UNSIGNED NOT NULL,
-
-    attachment_index INT UNSIGNED NOT NULL,
-    filename VARCHAR(255) NOT NULL,
-    content_type VARCHAR(255) NULL,
-    size_bytes BIGINT UNSIGNED NOT NULL,
-    payload LONGBLOB NOT NULL,
-
-    created_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
-
-    UNIQUE KEY uq_attachment_index (message_id, attachment_index),
-
-    CONSTRAINT fk_attachment_message
-        FOREIGN KEY (message_id)
-        REFERENCES message(message_id)
-        ON DELETE CASCADE
-);
-
-
--- ============================================================
--- Contacts
--- ============================================================
 
 CREATE TABLE contact (
-    contact_id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
-    account_id BIGINT UNSIGNED NOT NULL,
-
-    name VARCHAR(255) NOT NULL,
-    address VARCHAR(254) NOT NULL,
-    about TEXT NULL,
-
-    added_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
-
-    UNIQUE KEY uq_contact_account_address (account_id, address),
-    KEY ix_contact_account_name (account_id, name),
-
-    CONSTRAINT fk_contact_account
-        FOREIGN KEY (account_id)
-        REFERENCES account(account_id)
-        ON DELETE CASCADE
+    contact_id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY, 
+    account_id BIGINT UNSIGNED NOT NULL, 
+    name VARCHAR(255) NOT NULL, 
+    address VARCHAR(254) NOT NULL, 
+    about TEXT NULL, 
+    added_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6), 
+    UNIQUE KEY (account_id, address), 
+    FOREIGN KEY (account_id) REFERENCES account(account_id) ON DELETE CASCADE
 );
-
-
--- ============================================================
--- Block list
---
--- Addresses are stored directly because external addresses can
--- be blocked without being registered in Pearlescence.
--- ============================================================
 
 CREATE TABLE block (
-    block_id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
-    account_id BIGINT UNSIGNED NOT NULL,
-
-    address VARCHAR(254) NOT NULL,
-    blocked_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
-
-    UNIQUE KEY uq_block_account_address (account_id, address),
-
-    CONSTRAINT fk_block_account
-        FOREIGN KEY (account_id)
-        REFERENCES account(account_id)
-        ON DELETE CASCADE
+    block_id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY, 
+    account_id BIGINT UNSIGNED NOT NULL, 
+    address VARCHAR(254) NOT NULL, 
+    blocked_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6), 
+    UNIQUE KEY (account_id, address),
+    FOREIGN KEY (account_id) REFERENCES account(account_id) ON DELETE CASCADE
 );
 
-
--- ============================================================
--- Account actions
---
--- Filter/action syntax is protocol-level data. Storing it as
--- JSON keeps the schema independent of the eventual filter
--- grammar while still allowing structured storage.
--- ============================================================
-
-CREATE TABLE action (
-    action_id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
-
-    -- Protocol-visible Action UID.
-    action_uid BINARY(16) NOT NULL UNIQUE,
-
-    account_id BIGINT UNSIGNED NOT NULL,
-
-    enabled BOOLEAN NOT NULL DEFAULT TRUE,
-    priority INT NOT NULL,
-
-    filter JSON NOT NULL,
-    operations JSON NOT NULL,
-
+CREATE TABLE message (
+    message_id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY, 
+    sender_address VARCHAR(254) NOT NULL,
     created_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
-    updated_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6)
-        ON UPDATE CURRENT_TIMESTAMP(6),
-
-    KEY ix_action_account_priority (account_id, enabled, priority),
-
-    CONSTRAINT fk_action_account
-        FOREIGN KEY (account_id)
-        REFERENCES account(account_id)
-        ON DELETE CASCADE
+    updated_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6) ON UPDATE CURRENT_TIMESTAMP(6),
+    payload TEXT NOT NULL
 );
 
+CREATE TABLE attachment (
+    attachment_id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY, 
+    message_id BIGINT UNSIGNED NOT NULL, 
+    attachment_index INT UNSIGNED NOT NULL, 
+    filename VARCHAR(255) NOT NULL, 
+    content_type VARCHAR(255) NULL, 
+    size_bytes BIGINT UNSIGNED NOT NULL, 
+    payload LONGBLOB NOT NULL, 
+    created_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6), 
+    UNIQUE KEY (message_id, attachment_index),
+    FOREIGN KEY (message_id) REFERENCES message(message_id) ON DELETE CASCADE
+);
 
--- ============================================================
--- Mirror addresses
---
--- A mirror has its own address string and points to the account.
--- Messages received through it are assigned to MERC.
--- ============================================================
+CREATE TABLE message_recipient (
+    recipient_id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY, 
+    account_id BIGINT UNSIGNED NULL, 
+    message_id BIGINT UNSIGNED NOT NULL, 
+    recipient_type ENUM('TO', 'CC', 'BCC') NOT NULL, 
+    address VARCHAR(254) NOT NULL, 
+    recipient_order INT UNSIGNED NOT NULL DEFAULT 0, 
+    KEY (message_id, recipient_type, recipient_order), 
+    UNIQUE KEY (message_id, address),
+    FOREIGN KEY (message_id) REFERENCES message(message_id) ON DELETE CASCADE, 
+    FOREIGN KEY (account_id) REFERENCES account(account_id) ON DELETE CASCADE
+);
+
+CREATE TABLE inbound_message (
+    message_id BIGINT UNSIGNED NOT NULL,
+    account_id BIGINT UNSIGNED NOT NULL,
+    current_folder ENUM('INBOX','ARCHIVE','JUNK','TRASH','MERC') NOT NULL DEFAULT 'INBOX',
+    original_folder ENUM('INBOX','ARCHIVE','JUNK','TRASH','MERC') NOT NULL DEFAULT 'INBOX',
+    flagged BOOLEAN NOT NULL DEFAULT FALSE,
+    seen BOOLEAN NOT NULL DEFAULT FALSE,
+    received_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
+    read_at DATETIME(6) NULL,
+    updated_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6) ON UPDATE CURRENT_TIMESTAMP(6), 
+    KEY (account_id, current_folder, message_id),
+    PRIMARY KEY (account_id, message_id),
+    FOREIGN KEY (message_id) REFERENCES message(message_id) ON DELETE CASCADE,
+    FOREIGN KEY (account_id) REFERENCES account(account_id) ON DELETE CASCADE
+);
+
+CREATE TABLE inbound_message_tag (
+    message_id BIGINT UNSIGNED NOT NULL,
+    account_id BIGINT UNSIGNED NOT NULL,
+    tag VARCHAR(255) NOT NULL,
+    PRIMARY KEY (account_id, message_id, tag),
+    FOREIGN KEY (account_id, message_id) REFERENCES inbound_message(account_id, message_id) ON DELETE CASCADE
+);
+
+CREATE TABLE outbound_message (
+    message_id BIGINT UNSIGNED NOT NULL,
+    account_id BIGINT UNSIGNED NOT NULL,
+    current_folder ENUM('DRAFTS','OUTBOX','SENT','TRASH','ARCHIVE') NOT NULL DEFAULT 'DRAFTS',
+    original_folder ENUM('DRAFTS','OUTBOX','SENT','TRASH','ARCHIVE') NOT NULL DEFAULT 'DRAFTS',
+    flagged BOOLEAN NOT NULL DEFAULT FALSE,
+    drafted_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
+    out_at DATETIME(6) NULL,
+    sent_at DATETIME(6) NULL,
+    updated_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6) ON UPDATE CURRENT_TIMESTAMP(6), 
+    KEY (account_id, current_folder, message_id),
+    PRIMARY KEY (account_id, message_id),
+    FOREIGN KEY (message_id) REFERENCES message(message_id) ON DELETE CASCADE,
+    FOREIGN KEY (account_id) REFERENCES account(account_id) ON DELETE CASCADE
+);
+
+CREATE TABLE outbound_message_tag (
+    message_id BIGINT UNSIGNED NOT NULL,
+    account_id BIGINT UNSIGNED NOT NULL,
+    tag VARCHAR(255) NOT NULL,
+    PRIMARY KEY (account_id, message_id, tag),
+    FOREIGN KEY (account_id, message_id) REFERENCES outbound_message(account_id, message_id) ON DELETE CASCADE
+);
 
 CREATE TABLE mirror (
-    mirror_id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
-
-    account_id BIGINT UNSIGNED NOT NULL,
-    address VARCHAR(254) NOT NULL,
-
-    enabled BOOLEAN NOT NULL DEFAULT TRUE,
-    created_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
-    disabled_at DATETIME(6) NULL,
-
-    UNIQUE KEY uq_mirror_address (address),
-    UNIQUE KEY uq_mirror_account (account_id),
-
-    CONSTRAINT fk_mirror_account
-        FOREIGN KEY (account_id)
-        REFERENCES account(account_id)
-        ON DELETE CASCADE
+    mirror_id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY, 
+    account_id BIGINT UNSIGNED NOT NULL, 
+    address VARCHAR(254) NOT NULL UNIQUE, 
+    enabled BOOLEAN NOT NULL DEFAULT TRUE, 
+    created_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6), 
+    disabled_at DATETIME(6) NULL, 
+    FOREIGN KEY (account_id) REFERENCES account(account_id) ON DELETE CASCADE
 );
 
-
--- ============================================================
--- Optional message provenance for mirror delivery
---
--- This is NOT required to identify the message's destination;
--- it simply permits the server to know which mirror accepted it.
--- It does not replace sender_address or recipient addresses.
--- ============================================================
-
-CREATE TABLE message_mirror (
-    message_id BIGINT UNSIGNED PRIMARY KEY,
-    mirror_id BIGINT UNSIGNED NOT NULL,
-
-    CONSTRAINT fk_message_mirror_message
-        FOREIGN KEY (message_id)
-        REFERENCES message(message_id)
-        ON DELETE CASCADE,
-
-    CONSTRAINT fk_message_mirror_mirror
-        FOREIGN KEY (mirror_id)
-        REFERENCES mirror(mirror_id)
-        ON DELETE CASCADE
+CREATE TABLE action (
+    action_id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY, -- Protocol-visible Action UID. 
+    action_uid BINARY(16) NOT NULL UNIQUE, 
+    account_id BIGINT UNSIGNED NOT NULL, 
+    enabled BOOLEAN NOT NULL DEFAULT TRUE, 
+    priority INT NOT NULL, 
+    filter JSON NOT NULL, 
+    operations JSON NOT NULL, 
+    created_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6), 
+    updated_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6) ON UPDATE CURRENT_TIMESTAMP(6), 
+    FOREIGN KEY (account_id) REFERENCES account(account_id) ON DELETE CASCADE
 );
 
-SET GLOBAL event_scheduler = ON;
+SET GLOBAL event_scheduler = ON; 
+DELIMITER $$ 
 
-DELIMITER $$
+CREATE EVENT ev_cleanup 
+ON SCHEDULE EVERY 1 DAY STARTS CURRENT_TIMESTAMP + INTERVAL 1 DAY 
+DO BEGIN 
+    DELETE ar FROM address_reservation ar 
+    LEFT JOIN address a ON ar.address = a.address 
+    WHERE ar.reserved_until < CURRENT_TIMESTAMP(6) OR a.address IS NOT NULL; 
+    
+    DELETE mr from message_recipient AS mr
+    INNER JOIN mirror AS m ON m.address = mr.address
+    WHERE NOT m.enabled;
 
--- ============================================================
--- Reservation cleanup
---
--- Releases expired address reservations and removes reservations
--- whose addresses have already been claimed.
--- ============================================================
+    DELETE FROM mirror 
+    WHERE NOT enabled;
+    
+    UPDATE outbound_message SET original_folder = 'OUTBOX', current_folder = 'DRAFTS', out_at = NULL 
+    WHERE out_at < CURRENT_TIMESTAMP(6) - INTERVAL 1 WEEK AND current_folder = 'OUTBOX'; 
 
-CREATE EVENT IF NOT EXISTS ev_purge_weekly_address_reservations
-ON SCHEDULE EVERY 1 WEEK
-STARTS CURRENT_TIMESTAMP + INTERVAL 1 WEEK
-DO
-BEGIN
-    DELETE ar FROM address_reservation ar
-    LEFT JOIN address a ON ar.address = a.address
-    WHERE ar.reserved_until < CURRENT_TIMESTAMP(6)
-        OR a.address IS NOT NULL;
-END$$
+    UPDATE outbound_message SET original_folder = 'SENT', current_folder = 'ARCHIVE' 
+    WHERE sent_at < CURRENT_TIMESTAMP(6) - INTERVAL 2 MONTH AND current_folder = 'SENT'; 
+    
+    UPDATE inbound_message SET original_folder = 'INBOX', current_folder = 'ARCHIVE' 
+    WHERE received_at < CURRENT_TIMESTAMP(6) - INTERVAL 6 MONTH AND current_folder = 'INBOX'; 
+    
+    UPDATE outbound_message SET original_folder = 'DRAFTS', current_folder = 'ARCHIVE' 
+    WHERE drafted_at < CURRENT_TIMESTAMP(6) - INTERVAL 6 MONTH AND updated_at < CURRENT_TIMESTAMP(6) - INTERVAL 6 MONTH AND current_folder = 'DRAFTS'; 
+    
+    DELETE FROM outbound_message 
+    WHERE current_folder = 'TRASH' AND updated_at < CURRENT_TIMESTAMP(6) - INTERVAL 2 MONTH; 
+    
+    DELETE FROM inbound_message 
+    WHERE current_folder = 'TRASH' AND updated_at < CURRENT_TIMESTAMP(6) - INTERVAL 2 MONTH; 
+    
+    DELETE m FROM message AS m
+    LEFT JOIN inbound_message AS im ON im.message_id = m.message_id
+    LEFT JOIN outbound_message AS om ON om.message_id = m.message_id
+    WHERE im.message_id IS NULL AND om.message_id IS NULL;
 
-CREATE EVENT IF NOT EXISTS ev_cleanup_old_messages
-ON SCHEDULE EVERY 1 DAY
-STARTS CURRENT_TIMESTAMP + INTERVAL 1 WEEK
-DO
-BEGIN
-    UPDATE Messages 
-    SET original_folder = 'DRAFTS',
-        current_folder = 'DRAFTS',
-    WHERE created_at < CURRENT_TIMESTAMP(6) - INTERVAL 1 WEEK 
-        AND current_folder = 'OUTBOX';
-
-    UPDATE Messages 
-    SET original_folder = current_folder,
-        current_folder = 'ARCHIVE'
-    WHERE (created_at < CURRENT_TIMESTAMP(6) - INTERVAL 6 MONTH AND current_folder = 'INBOX') 
-        OR (created_at < CURRENT_TIMESTAMP(6) - INTERVAL 2 MONTH AND current_folder = 'SENT');
-
-    -- 3. Archive long-neglected Drafts
-    UPDATE Messages 
-    SET original_folder = current_folder,
-        current_folder = 'ARCHIVE'
-    WHERE created_at < CURRENT_TIMESTAMP(6) - INTERVAL 6 MONTH 
-        AND updated_at < CURRENT_TIMESTAMP(6) - INTERVAL 6 MONTH
-        AND current_folder = 'DRAFTS';
-        
-    -- 4. Purge permanent garbage
-    DELETE FROM Messages 
-    WHERE current_folder IN ('TRASH', 'JUNK', 'MERC') 
-        AND updated_at < CURRENT_TIMESTAMP(6) - INTERVAL 2 MONTH; 
-END$$
+END$$ 
 
 DELIMITER ;

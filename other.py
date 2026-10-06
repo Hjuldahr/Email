@@ -39,26 +39,29 @@ class SessionMode(IntEnum):
 
 @dataclass(slots=True)
 class SessionCoordinator:
-    version: int
+    # Application level
+    version: int 
     reader: asyncio.StreamReader
     writer: asyncio.StreamWriter
     pool: aiomysql.Pool
+    # Session level
     conn: aiomysql.connection.Connection
+    # Auth level
     user: User | None = None
-    cwd: Folder | None = None
+    # Session level
     mode: SessionMode = SessionMode.CONNECTED
     input_frame: InputFrame | None = None
+    view_only: bool = False
+    notify: bool = True
 
     def purge_auth(self):
         self.user = None
-        self.cwd = None
         self.mode = SessionMode.CONNECTED
 
     def open_auth(self, user: User):
         self.user = user
-        self.cwd = Folder.INBOX
         self.mode = SessionMode.AUTHENTICATED
-
+        
     async def cleanup(self):
         try:
             self.writer.close()
@@ -74,3 +77,15 @@ class SessionCoordinator:
         
     async def write(self, status: Status, *entries: str):
         await OutputFrame(self.version, status, entries).to_wire(self.writer)
+    
+    async def auth_check(self):
+        if self.mode != SessionMode.AUTHENTICATED:
+            await self.write(Status.ERR, 'You must be authenticated to use this operation.')
+            return False
+        return True
+    
+    async def modify_check(self):
+        if self.view_only:
+            await self.write(Status.ERR, 'You must have viewonly set to OFF to use this operation.')
+            return False
+        return True
