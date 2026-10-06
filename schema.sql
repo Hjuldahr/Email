@@ -53,8 +53,8 @@ CREATE TABLE address_reservation (
     reservation_id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
     address VARCHAR(254) NOT NULL,
     account_id BIGINT UNSIGNED NOT NULL,
-    released_at DATETIME(6) NOT NULL,
-    reserved_until DATETIME(6) NOT NULL,
+    released_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
+    reserved_until DATETIME(6) NOT NULL DEFAULT (CURRENT_TIMESTAMP(6) + INTERVAL 1 WEEK),
 
     UNIQUE KEY uq_reserved_address (address),
     KEY ix_reservation_account (account_id),
@@ -90,7 +90,7 @@ CREATE TABLE message (
     subject VARCHAR(998) NOT NULL,
     body LONGBLOB NOT NULL,
 
-    folder ENUM(
+    current_folder ENUM(
         'INBOX',
         'DRAFTS',
         'OUTBOX',
@@ -101,10 +101,22 @@ CREATE TABLE message (
         'MERC'
     ) NOT NULL,
 
+    original_folder ENUM(
+        'INBOX',
+        'DRAFTS',
+        'OUTBOX',
+        'SENT',
+        'ARCHIVE',
+        'JUNK',
+        'TRASH',
+        'MERC'
+    ) NULL,
+
     flagged BOOLEAN NOT NULL DEFAULT FALSE,
     seen BOOLEAN NOT NULL DEFAULT TRUE,
 
     created_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
+    updated_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6) ON UPDATE CURRENT_TIMESTAMP(6),
     received_at DATETIME(6) NULL,
     sent_at DATETIME(6) NULL,
     read_at DATETIME(6) NULL,
@@ -341,3 +353,58 @@ CREATE TABLE message_mirror (
         REFERENCES mirror(mirror_id)
         ON DELETE CASCADE
 );
+
+SET GLOBAL event_scheduler = ON;
+
+DELIMITER $$
+
+-- ============================================================
+-- Reservation cleanup
+--
+-- Releases expired address reservations and removes reservations
+-- whose addresses have already been claimed.
+-- ============================================================
+
+CREATE EVENT IF NOT EXISTS ev_purge_weekly_address_reservations
+ON SCHEDULE EVERY 1 WEEK
+STARTS CURRENT_TIMESTAMP + INTERVAL 1 WEEK
+DO
+BEGIN
+    DELETE ar FROM address_reservation ar
+    LEFT JOIN address a ON ar.address = a.address
+    WHERE ar.reserved_until < CURRENT_TIMESTAMP(6)
+        OR a.address IS NOT NULL;
+END$$
+
+CREATE EVENT IF NOT EXISTS ev_cleanup_old_messages
+ON SCHEDULE EVERY 1 DAY
+STARTS CURRENT_TIMESTAMP + INTERVAL 1 WEEK
+DO
+BEGIN
+    UPDATE Messages 
+    SET original_folder = 'DRAFTS',
+        current_folder = 'DRAFTS',
+    WHERE created_at < CURRENT_TIMESTAMP(6) - INTERVAL 1 WEEK 
+        AND current_folder = 'OUTBOX';
+
+    UPDATE Messages 
+    SET original_folder = current_folder,
+        current_folder = 'ARCHIVE'
+    WHERE (created_at < CURRENT_TIMESTAMP(6) - INTERVAL 6 MONTH AND current_folder = 'INBOX') 
+        OR (created_at < CURRENT_TIMESTAMP(6) - INTERVAL 2 MONTH AND current_folder = 'SENT');
+
+    -- 3. Archive long-neglected Drafts
+    UPDATE Messages 
+    SET original_folder = current_folder,
+        current_folder = 'ARCHIVE'
+    WHERE created_at < CURRENT_TIMESTAMP(6) - INTERVAL 6 MONTH 
+        AND updated_at < CURRENT_TIMESTAMP(6) - INTERVAL 6 MONTH
+        AND current_folder = 'DRAFTS';
+        
+    -- 4. Purge permanent garbage
+    DELETE FROM Messages 
+    WHERE current_folder IN ('TRASH', 'JUNK', 'MERC') 
+        AND updated_at < CURRENT_TIMESTAMP(6) - INTERVAL 2 MONTH; 
+END$$
+
+DELIMITER ;

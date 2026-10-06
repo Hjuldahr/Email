@@ -2,6 +2,7 @@ import asyncio
 import datetime
 from enum import IntEnum, auto
 import math
+import re
 import uuid
 from database import Database
 from input_frame import InputFrame, Operations
@@ -300,6 +301,9 @@ class PearlescentServer:
                         
                     case Operations.DC:
                         break
+                    
+                    case Operations.ADDR_REQ:
+                        await self.request_address_op(ses)
                         
                     case _:
                         await self._write_raw(writer, self.out_invalid_cmd)
@@ -401,3 +405,114 @@ class PearlescentServer:
         await ses.cleanup()
         self.sessions.discard(ses)
         ses = None
+        
+    async def request_address_op(self, ses: SessionCoordinator) -> None:
+        address, = ses.input_frame.arguments
+
+        if not (16 <= len(address) <= 254):
+            await ses.write(Status.ERR, "Address is not between 16 and 254 characters.")
+            return
+
+        plus = address.count("+")
+        
+        if plus > 1:
+            await ses.write(Status.ERR, "Address cannot contain more than 1 '+' symbol.")
+            return
+
+        if plus == 1:
+            address = re.sub(r"\+[^@]*@", "@", address)
+
+        if not re.search(r"^[^@\s,\\\"]{1,237}@pearlescent\.[a-zA-Z]{2,3}$", address, re.I):
+            await ses.write(Status.ERR, "Cannot register another domains address from the server.")
+            return
+
+        async with ses.conn.cursor() as cursor:
+            await cursor.execute(
+                """SELECT account_id FROM address_reservation 
+                WHERE LOWER(address) = LOWER(%s) AND reserved_until >= CURRENT_TIMESTAMP(6);""",
+                (address,),
+            )
+            row = await cursor.fetchone()
+            account_id = row[0] if row else None
+
+            if account_id is not None and account_id != ses.user.user_id:
+                await ses.write(Status.ERR, "Address is not available for request.")
+                return
+                
+            await cursor.execute(
+                """INSERT IGNORE INTO address (account_id, address)
+                VALUES (%s, %s);""",
+                (ses.user.user_id, address),
+            )
+            
+            affected = cursor.rowcount
+            await ses.conn.commit()
+            
+        if affected == 0:
+            await ses.write(Status.WARN, "Address is not available for request.")
+            return
+        
+        await ses.write(Status.OK, "Address has been assigned to your account.")
+        
+    async def release_address_op(self, ses: SessionCoordinator) -> None:
+        address, = ses.input_frame.arguments
+
+        async with ses.conn.cursor() as cursor:
+            await cursor.execute(
+                """DELETE FROM address
+                WHERE account_id = %s AND address = %s;""",
+                (ses.user.user_id, address),
+            )
+            if cursor.rowcount == 0:
+                await ses.write(Status.ERR, "Address is not available for release.")
+                return
+
+            await cursor.execute(
+                """INSERT INTO address_reservation (account_id, address)
+                VALUES (%s, %s)
+                ON DUPLICATE KEY UPDATE
+                    released_at = CURRENT_TIMESTAMP(6),
+                    reserved_until = CURRENT_TIMESTAMP(6) + INTERVAL 1 WEEK;""",
+                (ses.user.user_id, address),
+            )
+
+            await ses.conn.commit()
+
+        await ses.write(Status.OK, "Address has been released from your account.")
+        
+    async def address_op(self, ses: SessionCoordinator) -> None:
+        args = ses.input_frame.arguments
+
+        async with ses.conn.cursor() as cursor:
+            if len(args) == 1:
+                address, = args
+
+                await cursor.execute(
+                    """SELECT enabled FROM address
+                    WHERE account_id = %s AND address = %s;""",
+                    (ses.user.user_id, address),
+                )
+                row = await cursor.fetchone()
+
+                if row is None:
+                    await ses.write(Status.ERR, "Address does not exist")
+                else:
+                    await ses.write(Status.OK, "ON" if row[0] else "OFF")
+                return
+
+            enabled, address = args
+            enabled = enabled == "ON"
+
+            await cursor.execute(
+                """UPDATE address SET enabled = %s
+                WHERE account_id = %s AND address = %s;""",
+                (enabled, ses.user.user_id, address),
+            )
+            affected = cursor.rowcount
+            await ses.conn.commit()
+
+        if affected == 0:
+            await ses.write(Status.ERR, "Address does not exist or already set to this state")
+            return
+
+        await ses.write(Status.OK, "Enabled address" if enabled else "Disabled address")
