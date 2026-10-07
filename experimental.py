@@ -388,6 +388,29 @@ class PearlescentServer:
             writer.close()
             await writer.wait_closed()
 
+    # TODO notification generation
+    async def _notification_loop(self, ses: SessionCoordinator):
+        while True:
+            event = await ses.notification_queue.get()
+
+            if not ses.notify:
+                ses.notification_queue.task_done()
+                continue
+
+            events = [event]
+            ses.notification_queue.task_done()
+
+            try:
+                while True:
+                    next_event = await asyncio.wait_for(ses.notification_queue.get(), timeout=0.25)
+                    events.append(next_event)
+                    ses.notification_queue.task_done()
+            except TimeoutError:
+                pass
+
+            if events:
+                await ses.write(Status.SYNC, *events)
+
     async def _secure_listen(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
         peername = writer.get_extra_info("peername")
         ssl_object = writer.get_extra_info('ssl_object')
@@ -408,6 +431,10 @@ class PearlescentServer:
             conn = await self.db.pool.acquire()
             ses = SessionCoordinator(self.PROTO_VERSION, reader, writer, self.db.pool, conn)
             self.sessions.add(ses)
+            
+            notify_task = asyncio.create_task(
+                self._notification_loop(ses)
+            )
             
             await self._write_raw(writer, self.out_greeting)
             
@@ -530,6 +557,8 @@ class PearlescentServer:
             print(f"Invalid state: {e}")
             
         finally:
+            notify_task.cancel()
+            
             if ses is not None:
                 await self.dc_op(ses)
             else:

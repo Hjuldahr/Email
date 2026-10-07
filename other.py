@@ -53,7 +53,7 @@ class SessionCoordinator:
     view_only: bool = False
     notify: bool = True
     is_eof: bool = False
-    output: asyncio.Queue[OutputFrame] = field(
+    notification_queue: asyncio.Queue = field(
         default_factory=asyncio.Queue
     )
 
