@@ -3,7 +3,6 @@ import asyncio
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import IntEnum, StrEnum, auto
-import struct
 import aiomysql
 
 from input_frame import InputFrame
