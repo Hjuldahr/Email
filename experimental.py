@@ -3,6 +3,7 @@ import datetime
 from enum import IntEnum, auto
 import math
 import re
+import ssl
 import uuid
 from database import Database
 from input_frame import InputFrame, Operations
@@ -21,8 +22,9 @@ class ServerStatus(IntEnum):
 
 class PearlescentServer:
     HOST = "127.0.0.1"
-    UNSECURE_PORT = 25
-    SECURE_PORT = 26
+    # Testing
+    UNSECURE_PORT = 8025
+    SECURE_PORT = 8110
 
     PROTO_VERSION = 1
     NAMESPACE = uuid.UUID("99b00d33-11b3-4f37-bd46-18a624fcfe74")
@@ -46,20 +48,29 @@ class PearlescentServer:
 
     OUTBOUND_FOLDERS = { Folder.DRAFTS, Folder.OUTBOX, Folder.SENT, Folder.ARCHIVE, Folder.TRASH }
 
+    SAFE_CIPHERS = (
+        "ECDHE-ECDSA-AES256-GCM-SHA384:"
+        "ECDHE-RSA-AES256-GCM-SHA384:"
+        "ECDHE-ECDSA-CHACHA20-POLY1305:"
+        "ECDHE-RSA-CHACHA20-POLY1305:"
+        "ECDHE-ECDSA-AES128-GCM-SHA256:"
+        "ECDHE-RSA-AES128-GCM-SHA256"
+    )
+    SSL_OPTIONS = ssl.OP_NO_SSLv3 | ssl.OP_NO_SSLv2 | ssl.OP_NO_TLSv1 | ssl.OP_NO_TLSv1_1 | ssl.OP_CIPHER_SERVER_PREFERENCE | ssl.OP_NO_RENEGOTIATION
+
     def __init__(self):
         self.db = Database()
         self.unsecure_sock: asyncio.Server | None = None
         self.secure_sock: asyncio.Server | None = None
 
+        self.server_ssl_context: ssl.SSLContext | None = None
+        
         self.out_greeting = OutputFrame(self.PROTO_VERSION, Status.INFO, ["Pearlescence service ready."]).pack()
-
         self.out_ping = OutputFrame.MAGIC_PREFIX + self.PROTO_VERSION.to_bytes(1)
-
-        self.out_secure_params = OutputFrame(self.PROTO_VERSION, Status.INFO, ["Placeholder secure connection establishment params.", "A", "B", "C"]).pack()
-
+        self.out_secure_params: OutputFrame = None # Updates to match the current config on Start()
         self.out_invalid_cmd = OutputFrame(self.PROTO_VERSION, Status.WARN, ["Invalid operation."]).pack()
 
-        self.blocked_ips = set()
+        self.ip_blacklist: set[str] = set()
         self.sessions: set[SessionCoordinator] = set()
         self.status = ServerStatus.OFFLINE
 
@@ -222,78 +233,123 @@ class PearlescentServer:
     async def start(self):
             if self.status != ServerStatus.OFFLINE:
                 return
+            print(f"Server is now starting up")
             self.status = ServerStatus.CYCLING
     
             try:
+                self.server_ssl_context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+                self.server_ssl_context.minimum_version = ssl.TLSVersion.TLSv1_2
+                self.server_ssl_context.load_cert_chain(certfile="cert.pem", keyfile="key.pem")
+                
+                print(f"Server has acquired the assigned ssl certs.")
+
+                self.out_secure_params = OutputFrame(
+                    self.PROTO_VERSION, Status.INFO, 
+                    [
+                        f"ENDPOINT={self.HOST}:{self.SECURE_PORT}",
+                        f"MIN_TLS={self.server_ssl_context.minimum_version.name}",
+                        f"AUTH={self.server_ssl_context.protocol.name}",
+                        f"CIPHERS={self.SAFE_CIPHERS}"
+                    ]
+                ).pack()
+                
                 await self.db.open()
+                
+                if not await self.db.test():
+                    await self.db.close()
+                    self.status = ServerStatus.OFFLINE
+                    raise RuntimeError("Database verification failed")
+                
+                async with self.db.pool.acquire() as conn, conn.cursor() as cursor:
+                    await cursor.execute("SELECT ip_address FROM ip_blacklist;")
+                    self.ip_blacklist = {row[0] for row in await cursor.fetchall()}
+                    print(f"Server has acquired the IP blacklist\n{len(self.ip_blacklist)} addresses are presently blacklisted.")
     
                 if self.unsecure_sock is None:
-                    self.unsecure_sock = await asyncio.start_server( self._unsecure_listen, self.HOST, self.UNSECURE_PORT )
+                    self.unsecure_sock = await asyncio.start_server(self._unsecure_listen, self.HOST, self.UNSECURE_PORT)
+                    print("Server has started the unsecure port")
                     
                 if self.secure_sock is None:
-                    self.secure_sock = await asyncio.start_server( self._secure_listen, self.HOST, self.SECURE_PORT )
+                    self.secure_sock = await asyncio.start_server(self._secure_listen, self.HOST, self.SECURE_PORT, ssl=self.server_ssl_context)
+                    print("Server has started the secure port")
     
+                print(f"Server is now started.\nListening on {self.HOST}:{self.UNSECURE_PORT} (Unsecure) and {self.HOST}:{self.SECURE_PORT} (Secure)")
                 self.status = ServerStatus.ONLINE
     
-                async with self.unsecure_sock, self.secure_sock:
-                    await asyncio.gather( self.unsecure_sock.serve_forever(), self.secure_sock.serve_forever() )
-            except Exception:
+                await asyncio.gather(self.unsecure_sock.serve_forever(), self.secure_sock.serve_forever())
+                    
+            except Exception as e:
+                print(f"Server failed to start up: {e}")
                 self.status = ServerStatus.MALFUNCTIONING
                 raise
     
     async def stop(self, reason: str, grace_period: float = 0):
         if self.status != ServerStatus.ONLINE:
             return
+        print(f"Server is now shutting down.")
         self.status = ServerStatus.CYCLING
         
         try:
-            # Stop accepting new connections
             self.unsecure_sock.close()
             self.secure_sock.close()
+            print(f"Server has stopped accepting new connections")
             
-            # Close urchin connections
             self.unsecure_sock.close_clients()
             await self.unsecure_sock.wait_closed()
+            print(f"Server has closed unsecure connections.")
             
             # Grace period for active clients
             remaining = grace_period
             
-            while remaining > 0:
-                await self.broadcast(
-                    Status.INFO,
-                    f"The server is shutting down in {str(datetime.timedelta(seconds=math.ceil(remaining)))} for {reason}.\n", "Please disconnect when it is most convenient."
-                )
+            if grace_period > 0:
+                print(f"A {grace_period}s grace period will be given to secure connections.")
+            
+            while remaining > 0 and self.sessions:
+                time_str = str(datetime.timedelta(seconds=math.ceil(remaining)))
                 
-                if remaining <= 60:
-                    delay = remaining
-                else:
-                    delay = remaining / 2
-                if delay > 0:
-                    await asyncio.sleep(delay)
+                await self.broadcast( Status.INFO, f"The server is shutting down in {time_str} for {reason}.\n", "Please disconnect when it is most convenient." )
+                
+                delay = remaining if remaining <= 60 else (remaining / 2)
+                
+                if delay <= 0:
+                    break
+                    
+                await asyncio.sleep(delay)
                 remaining -= delay
 
-            await self.broadcast(Status.WARN, f"The server is shutting down now for {reason}.")
+            if self.sessions:
+                await self.broadcast(Status.WARN, f"The server is shutting down now for {reason}.")
 
             # Close client connections
             self.secure_sock.close_clients()
             await self.secure_sock.wait_closed()
+            print(f"Server has closed secure connections")
 
             await self.db.close()
+            print(f"Server has closed the MySQL connection")
             
             self.unsecure_sock = None
             self.secure_sock = None
             
             self.sessions = set()
             
+            print("Server is now shutdown.")
             self.status = ServerStatus.OFFLINE
         except Exception:
+            print("Server failed to shutdown up")
             self.status = ServerStatus.MALFUNCTIONING
             raise
+        
+    async def _safe_write(self, ses, status, entries):
+        try:
+            await ses.write(status, *entries)
+        except Exception:
+            self.sessions.discard(ses)
         
     async def broadcast(self, status: Status, *entries: str):
         # exclusive to secure sessions
         await asyncio.gather(
-            *(ses.write(status, *entries) for ses in tuple(self.sessions))
+            *(self._safe_write(ses, status, entries) for ses in tuple(self.sessions))
         )
             
     @staticmethod
@@ -303,7 +359,7 @@ class PearlescentServer:
 
     async def _unsecure_listen(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
         peername = writer.get_extra_info("peername")
-        if peername and peername[0] in self.blocked_ips:
+        if peername and peername[0] in self.ip_blacklist:
             writer.close()
             await writer.wait_closed()
             return
@@ -334,7 +390,9 @@ class PearlescentServer:
 
     async def _secure_listen(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
         peername = writer.get_extra_info("peername")
-        if peername and peername[0] in self.blocked_ips:
+        ssl_object = writer.get_extra_info('ssl_object')
+        
+        if (peername and peername[0] in self.ip_blacklist) or (ssl_object is None):
             writer.close()
             await writer.wait_closed()
             return
@@ -349,6 +407,9 @@ class PearlescentServer:
             
             while True:
                 await asyncio.wait_for(ses.read(), timeout=self.TIMEOUT)
+                
+                if ses.is_eof:
+                    break
                 
                 if ses.input_frame is None:
                     await ses.write(Status.ERR, "Malformed input frame received")
@@ -457,7 +518,7 @@ class PearlescentServer:
             await ses.write(Status.WARN, f"Connection timed out after {self.TIMEOUT}s. Executing {Operations.DC}")
             
         except asyncio.IncompleteReadError as e:
-            print(f"Connection ended: {e.partial!r}")
+            print(f"Connection ended: {e.partial}")
             
         except asyncio.InvalidStateError as e:
             print(f"Invalid state: {e}")
@@ -468,6 +529,10 @@ class PearlescentServer:
             else:
                 writer.close()
                 await writer.wait_closed()
+                try:
+                    await self.db.pool.release(conn)
+                except Exception:
+                    pass
 
     # ------------------------------------------------------------------
     # Connection/session
@@ -494,7 +559,7 @@ class PearlescentServer:
                 return
 
             ses.open_auth(User(cursor.lastrowid, username))
-            await ses.write(Status.OK, "User created.\nAccount opened.")
+            await ses.write(Status.OK, "Account created and authenticated.")
 
     async def login_op(self, ses: SessionCoordinator) -> None:
         username, password = ses.input_frame.arguments
@@ -504,7 +569,6 @@ class PearlescentServer:
                 "SELECT account_id, password_hash, created_at, last_login_at FROM account WHERE username = %s;",
                 (username,)
             )
-
             row = await cursor.fetchone()
 
             if not row:
@@ -528,14 +592,15 @@ class PearlescentServer:
                 WHERE account_id = %s AND current_folder = 'INBOX' AND NOT seen;""",
                 (account_id,)
             )
-
             unread_messages, = await cursor.fetchone()
 
         ses.open_auth(User(account_id, username, created_at, last_login_at))
+        
+        # Cleaned up string entries by removing embedded \n character anomalies
         await ses.write(
             Status.OK,
-            "Login successful.\n",
-            f"{unread_messages} new messages.\n",
+            "Login successful.",
+            f"{unread_messages} new messages.",
             f"Last login at {last_login_at}."
         )
 
@@ -2523,4 +2588,4 @@ class PearlescentServer:
 
             unread, = await cursor.fetchone()
 
-        await ses.write( Status.OK, *[ f"{folder} {count}" for folder, count in rows ], f"UNREAD {unread}", )
+        await ses.write( Status.OK, *[ f"{folder} {count}" for folder, count in rows ], f"UNREAD {unread}")

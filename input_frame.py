@@ -77,7 +77,7 @@ class InputFrame:
     INNER_TRAILER = struct.Struct("!I")
     ARG_PREFIX = struct.Struct("!H")
 
-    def __init__(self, version: int, operation: Operations, arguments: Sequence[str] | None):
+    def __init__(self, version: int, operation: Operations, arguments: Sequence[str] | None = None):
         self.version = version
         self.operation = operation
         self.arguments = arguments or []
@@ -105,6 +105,9 @@ class InputFrame:
         if not isinstance(value, InputFrame):
             return NotImplemented
         return self.version == value.version and self.operation == value.operation and self.arguments == value.arguments
+
+    def __hash__(self):
+        return hash((self.version, self.operation, *self.arguments))
 
     @classmethod
     async def from_wire(cls, reader: asyncio.StreamReader) -> InputFrame | None:
@@ -161,5 +164,5 @@ class InputFrame:
         return outer_header + inner_header + frame_body + inner_trailer
     
     async def to_wire(self, writer: asyncio.StreamWriter) -> None:
-        writer.writelines(self.pack())
+        writer.write(self.pack())
         await writer.drain()

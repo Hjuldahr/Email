@@ -13,7 +13,7 @@ class User:
     user_id: int
     username: str
     created_on: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
-    last_accessed_on: datetime | None = None
+    last_accessed_on: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
 
 class Folder(StrEnum):
     INBOX = 'INBOX'
@@ -36,7 +36,7 @@ class SessionMode(IntEnum):
     MESSAGE_VIEWING = auto()
     MESSAGE_COMPOSING = auto()
 
-@dataclass(slots=True)
+@dataclass(slots=True, unsafe_hash=True)
 class SessionCoordinator:
     # Application level
     version: int 
@@ -52,6 +52,7 @@ class SessionCoordinator:
     input_frame: InputFrame | None = None
     view_only: bool = False
     notify: bool = True
+    is_eof: bool = False
 
     def purge_auth(self):
         self.user = None
@@ -72,7 +73,11 @@ class SessionCoordinator:
                 pass
             
     async def read(self):
-        self.input_frame = await InputFrame.from_wire(self.reader)
+        try:
+            self.input_frame = await InputFrame.from_wire(self.reader)
+        finally:
+            if self.input_frame is None and self.reader.at_eof():
+                self.is_eof = True
         
     async def write(self, status: Status, *entries: str):
         await OutputFrame(self.version, status, entries).to_wire(self.writer)

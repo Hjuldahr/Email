@@ -5,12 +5,18 @@ CREATE DATABASE pearlescence
 
 USE pearlescence;
 
+CREATE TABLE ip_blacklist (
+    ip_address VARCHAR(45) PRIMARY KEY, -- Supports both IPv4 and IPv6 string footprints
+    reason VARCHAR(255),
+    blocked_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
 CREATE TABLE account (
     account_id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY, 
     username VARCHAR(254) NOT NULL UNIQUE, 
     password_hash VARBINARY(512) NOT NULL, 
     created_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6), 
-    last_login_at DATETIME(6) NULL
+    last_login_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6)
 );
 
 CREATE TABLE address (

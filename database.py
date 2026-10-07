@@ -24,12 +24,14 @@ class Database:
         
     async def test(self) -> bool:
         if self.pool is None or self.pool.closed:
+            print(f"Failed to connect to MySQL: MySQL pool is closed")
             return False
         try:
-            async with self.pool.acquire() as conn, conn.cursor() as cur:
-                await cur.execute("SELECT VERSION();")
-                ver, = await cur.fetchone()
+            async with self.pool.acquire() as conn, conn.cursor() as cursor:
+                await cursor.execute("SELECT VERSION();")
+                ver, = await cursor.fetchone()
                 print(f"Connected to MySQL version: {ver}")
                 return True
-        except Exception:
+        except Exception as e:
+            print(f"Failed to connect to MySQL: {e}")
             return False
