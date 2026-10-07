@@ -58,6 +58,8 @@ class PearlescentServer:
     )
     SSL_OPTIONS = ssl.OP_NO_SSLv3 | ssl.OP_NO_SSLv2 | ssl.OP_NO_TLSv1 | ssl.OP_NO_TLSv1_1 | ssl.OP_CIPHER_SERVER_PREFERENCE | ssl.OP_NO_RENEGOTIATION
 
+    SEND_DELAY = 60
+
     def __init__(self):
         self.db = Database()
         self.unsecure_sock: asyncio.Server | None = None
@@ -73,6 +75,9 @@ class PearlescentServer:
         self.ip_blacklist: set[str] = set()
         self.sessions: set[SessionCoordinator] = set()
         self.status = ServerStatus.OFFLINE
+        
+        self.send_sem = asyncio.Semaphore(50) 
+        self.send_map: dict[int, asyncio.Task] = {}
 
     # ------------------------------------------------------------------
     # Generic helpers
@@ -1059,6 +1064,7 @@ class PearlescentServer:
         await ses.write( Status.OK, f"Moved {len(message_ids)} message(s) to {destination.value}." )
 
     async def seen_op(self, ses: SessionCoordinator) -> None:
+        # TODO send notification to client that their message was seen by someone else
         if not await ses.auth_check() or not await ses.modify_check():
             return
 
@@ -2067,41 +2073,88 @@ class PearlescentServer:
 
         await ses.write( Status.ERR, "EDIT BODY requires the transport raw-stream extension." )
 
+    async def send_task(self, ses: SessionCoordinator, message_id: int):
+        # TODO send notification on succesful or failed send
+        
+        try:
+            async with self.send_sem:
+                await asyncio.sleep(self.SEND_DELAY)
+                
+                async with ses.pool.acquire() as conn: 
+                    async with conn.cursor() as cursor:
+                        await cursor.execute(
+                            """UPDATE outbound_message
+                            SET current_folder = 'SENT', original_folder = 'OUTBOX', sent_at = CURRENT_TIMESTAMP(6)
+                            WHERE account_id = %s AND message_id = %s AND current_folder = 'OUTBOX';""",
+                            (ses.user.user_id, message_id),
+                        )
+                        await conn.commit() 
+                        
+        except Exception as e:
+            print(f"Failed to process background send for message {message_id}: {e}")
+        finally:
+            self.send_map.pop(message_id, None)
+
+    def remove_send_task(self, message_id: int):
+        self.send_map.pop(message_id, None)
+
     async def send_op(self, ses: SessionCoordinator) -> None:
         if not await ses.auth_check() or not await ses.modify_check():
             return
 
         args = ses.input_frame.arguments
-
         if not args:
             await ses.write(Status.ERR, "Message UID is required.")
             return
 
         try:
-            message_ids = [int(value) for value in args if value.upper() != "NOW"]
+            message_ids = [int(value) for value in args if value.upper() not in {"NOW", "ABORT"}]
         except ValueError:
             await ses.write(Status.ERR, "Invalid Message UID.")
             return
 
-        mode = next( (value.upper() for value in args if value.upper() in {"NOW", "ABORT"}), None, )
+        mode = next((value.upper() for value in args if value.upper() in {"NOW", "ABORT"}), None)
 
         if mode == "ABORT":
-            await ses.write( Status.ERR, "ABORT requires an OUTBOX message; SEND normally operates on drafts." )
+            aborted_ids = []
+            
+            async with ses.conn.cursor() as cursor:
+                if not await self._require_messages(ses, cursor, message_ids):
+                    return
+
+                for message_id in message_ids:
+                    row = await self._message_folder(ses, cursor, message_id)
+                    
+                    if row != ('OUTBOX', 'OUTBOUND'):
+                        continue
+
+                    if task := self.send_map.pop(message_id, None):
+                        task.cancel()
+
+                    await cursor.execute(
+                        """UPDATE outbound_message SET current_folder = 'DRAFTS', original_folder = 'OUTBOUND', out_at = NULL
+                        WHERE account_id = %s AND message_id = %s AND current_folder = 'OUTBOX';""",
+                        (ses.user.user_id, message_id),
+                    )
+                    aborted_ids.append(message_id)
+
+                await ses.conn.commit()
+
+            if aborted_ids:
+                await ses.write(Status.OK, "Successfully aborted delivery for:", *[str(mid) for mid in aborted_ids])
+            else:
+                await ses.write(Status.ERR, "No matching pending OUTBOX messages found to abort.")
             return
 
+        valid_ids = []
         async with ses.conn.cursor() as cursor:
-            if not await self._require_messages( ses, cursor, message_ids, ):
+            if not await self._require_messages(ses, cursor, message_ids):
                 return
 
             for message_id in message_ids:
-                row = await self._message_folder( ses, cursor, message_id, )
-
+                row = await self._message_folder(ses, cursor, message_id)
                 if row != ('DRAFTS', 'OUTBOUND'):
-                    await ses.write(
-                        Status.ERR,
-                        f"Message {message_id} is not in DRAFTS."
-                    )
-                    return
+                    continue
 
                 await cursor.execute(
                     """UPDATE outbound_message
@@ -2109,10 +2162,18 @@ class PearlescentServer:
                     WHERE account_id = %s AND message_id = %s AND current_folder = 'DRAFTS';""",
                     (ses.user.user_id, message_id),
                 )
+                valid_ids.append(message_id)
 
             await ses.conn.commit()
 
-        await ses.write( Status.OK, *[ f"{message_id} queued for delivery." for message_id in message_ids ], )
+        if valid_ids:
+            for message_id in valid_ids:
+                send_task = asyncio.create_task(self.send_task(ses, message_id))
+                self.send_map[message_id] = send_task
+
+            await ses.write(Status.OK, "Queued for delivery:", *[str(message_id) for message_id in valid_ids])
+        else:
+            await ses.write(Status.ERR, "No valid DRAFTS messages were found to queue.")
 
     # ------------------------------------------------------------------
     # Attachments
