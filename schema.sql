@@ -52,11 +52,13 @@ CREATE TABLE block (
 );
 
 CREATE TABLE message (
+    thread_id BIGINT UNSIGNED,
     message_id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY, 
     sender_address VARCHAR(254) NOT NULL,
     created_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
     updated_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6) ON UPDATE CURRENT_TIMESTAMP(6),
-    payload TEXT NOT NULL
+    subject TEXT NOT NULL,
+    payload LONGTEXT NOT NULL
 );
 
 CREATE TABLE attachment (
@@ -80,7 +82,7 @@ CREATE TABLE message_recipient (
     address VARCHAR(254) NOT NULL, 
     recipient_order INT UNSIGNED NOT NULL DEFAULT 0, 
     KEY (message_id, recipient_type, recipient_order), 
-    UNIQUE KEY (message_id, address),
+    UNIQUE KEY (message_id, recipient_type, address),
     FOREIGN KEY (message_id) REFERENCES message(message_id) ON DELETE CASCADE, 
     FOREIGN KEY (account_id) REFERENCES account(account_id) ON DELETE CASCADE
 );
@@ -166,9 +168,10 @@ DO BEGIN
     LEFT JOIN address a ON ar.address = a.address 
     WHERE ar.reserved_until < CURRENT_TIMESTAMP(6) OR a.address IS NOT NULL; 
     
-    DELETE mr from message_recipient AS mr
-    INNER JOIN mirror AS m ON m.address = mr.address
-    WHERE NOT m.enabled;
+    DELETE im FROM inbound_message AS im
+    INNER JOIN message_recipient AS mr ON im.message_id = mr.message_id
+    INNER JOIN mirror AS mir ON mr.address = mir.address
+    WHERE NOT mir.enabled;
 
     DELETE FROM mirror 
     WHERE NOT enabled;

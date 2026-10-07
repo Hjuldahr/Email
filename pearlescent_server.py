@@ -6,7 +6,7 @@ import re
 import uuid
 from database import Database
 from input_frame import InputFrame, Operations
-from other import SessionCoordinator, SessionMode, User
+from other import SessionCoordinator, User
 from output_frame import OutputFrame, Status
 import aiobcrypt
 
@@ -21,8 +21,7 @@ class ServerStatus(IntEnum):
 class PearlescentServer:
     HOST = "127.0.0.1"
     UNSECURE_PORT = 25
-    SECURE_PORT = 25
-    POP3_PORT = 110
+    SECURE_PORT = 26
 
     PROTO_VERSION = 1
     NAMESPACE = uuid.UUID("99b00d33-11b3-4f37-bd46-18a624fcfe74")
@@ -139,105 +138,6 @@ class PearlescentServer:
         await asyncio.gather(
             *(ses.write(status, *entries) for ses in tuple(self.sessions))
         )
-        
-    async def repair(self, reboot: bool = True):
-        if self.status != ServerStatus.MALFUNCTIONING:
-            return
-        self.status = ServerStatus.CYCLING
-        
-        # Clean up Unsecure Socket
-        if self.unsecure_sock is not None:
-            print("Attempting to fix unsecure port")
-            try:
-                self.unsecure_sock.close()
-            except Exception as e:
-                print(f"Error calling close on unsecure socket: {e}")
-            try:
-                self.unsecure_sock.close_clients()
-            except Exception as e:
-                print(f"Error closing unsecure clients: {e}")
-            try:
-                await self.unsecure_sock.wait_closed()
-            except Exception as e:
-                print(f"Issue occurred during unsecure port wait_closed: {e}")
-            finally:
-                print("Reset unsecure port")
-                self.unsecure_sock = None
-
-        # Clean up Secure Socket
-        if self.secure_sock is not None:
-            print("Attempting to fix secure port")
-            try:
-                self.secure_sock.close()
-            except Exception as e:
-                print(f"Error calling close on secure socket: {e}")
-            try:
-                self.secure_sock.close_clients()
-            except Exception as e:
-                print(f"Error closing secure clients: {e}")
-            try:
-                await self.secure_sock.wait_closed()
-            except Exception as e:
-                print(f"Issue occurred during secure port wait_closed: {e}")
-            finally:
-                print("Reset secure port")
-                self.secure_sock = None
-
-        # Clean up Session Pool
-        if self.sessions is None:
-            print("Cached session coordinator pool is unset")
-        elif not isinstance(self.sessions, set):
-            print("Cached session coordinator pool is not a Set")
-        else:
-            error = 0
-            invalid = 0
-            print(f"{len(self.sessions)} elements found in sessions")
-            for e in tuple(self.sessions):
-                if e is not None and isinstance(e, SessionCoordinator):
-                    try:
-                        await e.cleanup()
-                    except Exception as err:
-                        error += 1
-                        print(f"Failed to close session element: {err}")
-                else:
-                    invalid += 1
-                    print(f"{e} is not a SessionCoordinator")
-                    
-            print(f"{invalid} elements were not SessionCoordinatoors. {error} SessionCoordinatoors failed to close.")
-
-        self.sessions = set()
-        print("Cleared cached session coordinator pool")
-
-        # Clean up Database Context
-        if self.db is not None:
-            print("Attempting to fix DB")
-            try:
-                if await self.db.test(): 
-                    print("Can connect to DB currently")
-                else:
-                    print("Cannot connect to DB currently")
-            except Exception as e:
-                print(f"DB connectivity check threw an error: {e}")
-
-            try:
-                await self.db.close()
-            except Exception as e:
-                print(f"Issue occurred during database close: {e}")
-                
-        print("Reset DB")
-        self.db = Database()
-        
-        # 5. Guarded Reboot Routine
-        self.status = ServerStatus.OFFLINE
-        if reboot:
-            print("Initiating server reboot sequence...")
-            try:
-                await self.start()
-            except Exception as e:
-                self.status = ServerStatus.MALFUNCTIONING
-                print(f"Failed to reboot: {e}. Server remains MALFUNCTIONING.")
-        else:
-            print("Server OFFLINE.")
             
     @staticmethod
     async def _write_raw(writer: asyncio.StreamWriter, data: bytes) -> None:
@@ -402,9 +302,8 @@ class PearlescentServer:
             await ses.conn.commit()
 
             await cursor.execute(
-                """SELECT COUNT(*) FROM message
-                INNER JOIN address ON message.address = address.address
-                WHERE address.account_id = %s AND message.folder = 'INBOX' AND NOT message.seen;""",
+                """SELECT COUNT(*) FROM inbound_message
+                WHERE account_id = %s AND current_folder = 'INBOX' AND NOT seen;""",
                 (account_id,)
             )
 
@@ -418,7 +317,7 @@ class PearlescentServer:
             f"Last login at {last_login_at}."
         )
         
-    async def logout_op(self, ses: SessionCoordinator, suppress_output: bool = False) -> None:
+    async def logout_op(self, ses: SessionCoordinator) -> None:
         if ses.user is not None:
             await ses.write(Status.OK, "Logout successful.")
             ses.purge_auth()
@@ -433,7 +332,6 @@ class PearlescentServer:
             await ses.write(Status.OK, "Disconnected.")
         await ses.cleanup()
         self.sessions.discard(ses)
-        ses = None
         
     async def request_address_op(self, ses: SessionCoordinator) -> None:
         if not await ses.auth_check() or not await ses.modify_check():
@@ -561,10 +459,10 @@ class PearlescentServer:
         
         async with ses.conn.cursor() as cursor:
             await cursor.execute(
-                """SELECT a.address, a.enabled, COALESCE(SUM(mr.current_folder = 'INBOX' AND NOT mr.seen), 0) AS unread_count FROM address AS a
-                LEFT JOIN message_recipient AS mr ON a.account_id = mr.account_id AND a.address = mr.address
-                WHERE a.account_id = %s
-                GROUP BY a.address, a.enabled;""",
+                """SELECT address, enabled
+                FROM address
+                WHERE account_id = %s
+                ORDER BY address;""",
                 (ses.user.user_id,),
             )
             rows = await cursor.fetchall()
@@ -573,7 +471,7 @@ class PearlescentServer:
                 await ses.write(Status.WARN, f'You have zero addresses registered.')
                 return
                 
-            await ses.write(Status.OK, f'You have {len(rows)} addresses registered.', *[f'{row[0]} {"ON" if row[1] else "OFF"} {row[2]}' for row in rows])
+            await ses.write(Status.OK, f'You have {len(rows)} addresses registered.', *[f'{row[0]} {"ON" if row[1] else "OFF"}' for row in rows])
             
     async def viewonly_op(self, ses: SessionCoordinator) -> None:
         args = ses.input_frame.arguments
@@ -594,7 +492,7 @@ class PearlescentServer:
         args = ses.input_frame.arguments
 
         if len(args) == 0:
-            await ses.write(Status.OK, "Notify mode is ON" if ses.view_only else "Notify mode is OFF")
+            await ses.write(Status.OK, "Notify mode is ON" if ses.notify else "Notify mode is OFF")
             return
 
         enabled, = args
@@ -606,71 +504,4 @@ class PearlescentServer:
         ...
         
     async def move_op(self, ses: SessionCoordinator) -> None:
-        if not await ses.auth_check() or not await ses.modify_check():
-            return
-
-        destination_folder, *message_uids = ses.input_frame.arguments
-        message_uids = list(map(int, message_uids))
-
-        placeholders = ', '.join(['%s'] * len(message_uids))
-
-        async with ses.conn.cursor() as cursor:
-            # Check folder regardless of if you were sent it or received it.
-            await cursor.execute(
-                f"""SELECT m.message_id, m.current_folder, mr.current_folder FROM message AS m
-                LEFT JOIN message_recipient AS mr ON m.message_id = mr.message_id AND mr.account_id = %s
-                WHERE (m.account_id = %s OR mr.account_id IS NOT NULL) AND m.message_id IN ({placeholders});""",
-                (ses.user.user_id, ses.user.user_id, *message_uids),
-            )
-
-            rows = await cursor.fetchall()
-
-            if not rows:
-                await ses.write(Status.ERR, "Message not found")
-                return
-
-            message_ids = []
-            recipient_ids = []
-
-            for message_id, sender_folder, recipient_folder in rows:
-                if recipient_folder is not None:
-                    current_folder = recipient_folder
-                else:
-                    current_folder = sender_folder
-
-                if current_folder == destination_folder:
-                    continue
-
-                if destination_folder not in self.DESTINATION_TRANSITIONS[current_folder]:
-                    continue
-
-                if recipient_folder is not None:
-                    recipient_ids.append(message_id)
-                else:
-                    message_ids.append(message_id)
-
-            if not message_ids and not recipient_ids:
-                await ses.write(Status.ERR, "No messages can be moved")
-                return
-
-            if message_ids:
-                placeholders = ', '.join(['%s'] * len(message_ids))
-                await cursor.execute(
-                    f"""UPDATE message SET current_folder = %s
-                    WHERE message_id IN ({placeholders}) AND account_id = %s;""",
-                    (destination_folder, *message_ids, ses.user.user_id),
-                )
-
-            if recipient_ids:
-                placeholders = ', '.join(['%s'] * len(recipient_ids))
-                await cursor.execute(
-                    f"""UPDATE message_recipient SET current_folder = %s
-                    WHERE message_id IN ({placeholders}) AND account_id = %s;""",
-                    (destination_folder, *recipient_ids, ses.user.user_id),
-                )
-
-            await ses.conn.commit()
-
-        await ses.write(Status.OK, f"Moved {len(message_ids) + len(recipient_ids)} message(s) to {destination_folder}")
-        
-    
+        ...
