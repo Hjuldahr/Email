@@ -397,6 +397,12 @@ class PearlescentServer:
             await writer.wait_closed()
             return
         
+        # TODO (if notify is ON only) SSE for newly arrived messages & replies to threads your in 
+        # (cumulative and time batched, eg: you have <X> unread messages to <address>, 
+        # which will stop sending once past an alert capacity limit such 99+ total unread messages per address), 
+        # successful sent from the outbox (indicates its both no longer retractable and did not fail), 
+        # when a recipient has viewed a sent message (can add aggregate batching for rapid views in a short period eg: <X> recipients have just viewed message <UID>)
+        
         ses = None
         try:
             conn = await self.db.pool.acquire()

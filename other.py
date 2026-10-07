@@ -53,6 +53,9 @@ class SessionCoordinator:
     view_only: bool = False
     notify: bool = True
     is_eof: bool = False
+    output: asyncio.Queue[OutputFrame] = field(
+        default_factory=asyncio.Queue
+    )
 
     def purge_auth(self):
         self.user = None
