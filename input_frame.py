@@ -77,10 +77,10 @@ class InputFrame:
     INNER_TRAILER = struct.Struct("!I")
     ARG_PREFIX = struct.Struct("!H")
 
-    def __init__(self, version: int, operation: Operations, arguments: Sequence[str] | None = None):
+    def __init__(self, version: int, operation: Operations, *arguments: str):
         self.version = version
         self.operation = operation
-        self.arguments = arguments or []
+        self.arguments = arguments
 
     def __int__(self) -> int:
         return self.operation.value

@@ -25,10 +25,10 @@ class OutputFrame:
     INNER_TRAILER = struct.Struct("!I")
     ENTRY_PREFIX = struct.Struct("!H")
 
-    def __init__(self, version: int, status: Status, entries: Sequence[str] | None = None):
+    def __init__(self, version: int, status: Status, *entries: str):
         self.version = version
         self.status = status
-        self.entries = entries or []
+        self.entries = entries
 
     def __int__(self) -> int:
         return self.status.value

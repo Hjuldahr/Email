@@ -7,7 +7,7 @@ import ssl
 import uuid
 from database import Database
 from input_frame import InputFrame, Operations
-from other import SessionCoordinator, User, Folder
+from other import Direction, MessageFolder, SessionCoordinator, User, Folder
 from output_frame import OutputFrame, Status
 import aiobcrypt
 
@@ -31,22 +31,22 @@ class PearlescentServer:
 
     TIMEOUT = 300
 
-    DESTINATION_TRANSITIONS = {
-        'OUTBOX': {'DRAFTS', 'TRASH', 'ARCHIVE'},
-        'DRAFTS': {'OUTBOX', 'TRASH', 'ARCHIVE'},
-        'MERC': {'INBOX', 'JUNK', 'TRASH', 'ARCHIVE'},
-        'INBOX': {'JUNK', 'TRASH', 'ARCHIVE'},
-        'SENT': {'TRASH', 'ARCHIVE'},
-        'JUNK': {'INBOX', 'ARCHIVE', 'TRASH'},
-        'ARCHIVE': {'INBOX', 'JUNK', 'SENT', 'DRAFTS', 'TRASH'},
-        'TRASH': {'INBOX', 'JUNK', 'SENT', 'DRAFTS'},
-    }
+    DESTINATION_TRANSITIONS = frozendict({
+        Folder.OUTBOX: {Folder.DRAFTS, Folder.TRASH, Folder.ARCHIVE},
+        Folder.DRAFTS: {Folder.OUTBOX, Folder.TRASH, Folder.ARCHIVE},
+        Folder.MERC: {Folder.OUTBOX, Folder.JUNK, Folder.TRASH, Folder.ARCHIVE},
+        Folder.OUTBOX: {Folder.JUNK, Folder.TRASH, Folder.ARCHIVE},
+        Folder.SENT: {Folder.TRASH, Folder.ARCHIVE},
+        Folder.JUNK: {Folder.OUTBOX, Folder.ARCHIVE, Folder.TRASH},
+        Folder.ARCHIVE: {Folder.OUTBOX, Folder.JUNK, Folder.SENT, Folder.DRAFTS, Folder.TRASH},
+        Folder.TRASH: {Folder.OUTBOX, Folder.JUNK, Folder.SENT, Folder.DRAFTS},
+    })
 
-    INBOUND_FOLDERS = {Folder.INBOX, Folder.MERC, Folder.JUNK, Folder.ARCHIVE, Folder.TRASH}
+    INBOUND_FOLDERS = frozenset((Folder.INBOX, Folder.MERC, Folder.JUNK, Folder.ARCHIVE, Folder.TRASH))
 
-    ORDINARY_INBOUND_FOLDERS = { Folder.INBOX, Folder.MERC, Folder.JUNK }
+    ORDINARY_INBOUND_FOLDERS = frozenset((Folder.INBOX, Folder.MERC, Folder.JUNK))
 
-    OUTBOUND_FOLDERS = { Folder.DRAFTS, Folder.OUTBOX, Folder.SENT, Folder.ARCHIVE, Folder.TRASH }
+    OUTBOUND_FOLDERS = frozenset((Folder.DRAFTS, Folder.OUTBOX, Folder.SENT, Folder.ARCHIVE, Folder.TRASH))
 
     SAFE_CIPHERS = (
         "ECDHE-ECDSA-AES256-GCM-SHA384:"
@@ -60,6 +60,8 @@ class PearlescentServer:
 
     SEND_DELAY = 60
 
+    REM_ORIGIN_SUBJ_REGX = re.compile(r'^\[(INBOX|MERC|JUNK|ARCHIVE|TRASH|DRAFTS|OUTBOX|SENT)\]\s*')
+
     def __init__(self):
         self.db = Database()
         self.unsecure_sock: asyncio.Server | None = None
@@ -67,10 +69,10 @@ class PearlescentServer:
 
         self.server_ssl_context: ssl.SSLContext | None = None
         
-        self.out_greeting = OutputFrame(self.PROTO_VERSION, Status.INFO, ["Pearlescence service ready."]).pack()
+        self.out_greeting = OutputFrame(self.PROTO_VERSION, Status.INFO, "Pearlescence service ready.").pack()
         self.out_ping = OutputFrame.MAGIC_PREFIX + self.PROTO_VERSION.to_bytes(1)
         self.out_secure_params: OutputFrame = None # Updates to match the current config on Start()
-        self.out_invalid_cmd = OutputFrame(self.PROTO_VERSION, Status.WARN, ["Invalid operation."]).pack()
+        self.out_invalid_cmd = OutputFrame(self.PROTO_VERSION, Status.WARN, "Invalid operation.").pack()
 
         self.ip_blacklist: set[str] = set()
         self.sessions: set[SessionCoordinator] = set()
@@ -86,14 +88,6 @@ class PearlescentServer:
     @staticmethod
     def _placeholders(values) -> str:
         return ', '.join(['%s'] * len(values))
-
-    @staticmethod
-    def _origin_subject(folder: str, subject: str) -> str:
-        return f'[{folder}] {subject}'
-
-    @staticmethod
-    def _remove_origin_subject(subject: str) -> str:
-        return re.sub(r'^\[(INBOX|MERC|JUNK|ARCHIVE|TRASH|DRAFTS|OUTBOX|SENT)\]\s*', '', subject, count=1)
 
     @staticmethod
     def _parse_uids(args: list[str]) -> list[int] | None:
@@ -198,7 +192,7 @@ class PearlescentServer:
         ses: SessionCoordinator,
         cursor,
         message_id: int,
-    ) -> tuple[str, str] | None:
+    ) -> MessageFolder | None:
         await cursor.execute(
             """SELECT current_folder, 'INBOUND'
             FROM inbound_message
@@ -212,7 +206,8 @@ class PearlescentServer:
             LIMIT 1;""",
             (ses.user.user_id, message_id, ses.user.user_id, message_id),
         )
-        return await cursor.fetchone()
+        row = await cursor.fetchone()
+        return MessageFolder(*row) if row else None
 
     async def _delete_message(
         self,
@@ -249,13 +244,12 @@ class PearlescentServer:
                 print(f"Server has acquired the assigned ssl certs.")
 
                 self.out_secure_params = OutputFrame(
-                    self.PROTO_VERSION, Status.INFO, 
-                    [
-                        f"ENDPOINT={self.HOST}:{self.SECURE_PORT}",
-                        f"MIN_TLS={self.server_ssl_context.minimum_version.name}",
-                        f"AUTH={self.server_ssl_context.protocol.name}",
-                        f"CIPHERS={self.SAFE_CIPHERS}"
-                    ]
+                    self.PROTO_VERSION, 
+                    Status.INFO, 
+                    f"ENDPOINT={self.HOST}:{self.SECURE_PORT}",
+                    f"MIN_TLS={self.server_ssl_context.minimum_version.name}",
+                    f"AUTH={self.server_ssl_context.protocol.name}",
+                    f"CIPHERS={self.SAFE_CIPHERS}"
                 ).pack()
                 
                 await self.db.open()
@@ -994,9 +988,7 @@ class PearlescentServer:
                 await ses.write(Status.ERR, "Message does not exist.")
                 return
 
-            folder, direction = row
-
-            if direction != 'INBOUND' or folder not in { Folder.INBOX, Folder.MERC, Folder.JUNK }:
+            if row.direction != Direction.INBOUND or row.folder not in { Folder.INBOX, Folder.MERC, Folder.JUNK }:
                 await ses.write( Status.ERR, "Message must be in INBOX, MERC, or JUNK." )
                 return
 
@@ -1037,18 +1029,14 @@ class PearlescentServer:
                 return
 
             for message_id in message_ids:
-                row = await self._message_folder( ses, cursor, message_id, )
+                row = await self._message_folder(ses, cursor, message_id)
 
-                folder, direction = row
-
-                if direction != 'INBOUND':
+                if row.direction != Direction.INBOUND:
                     await ses.write( Status.ERR, f"Message {message_id} is not an inbound message." )
                     return
 
-                allowed = { Folder.INBOX: {Folder.JUNK}, Folder.JUNK: {Folder.INBOX}, Folder.MERC: {Folder.INBOX, Folder.JUNK}, }
-
-                if destination.value not in allowed.get(folder, set()):
-                    await ses.write( Status.ERR, f"Cannot move {folder} to {destination.value}." )
+                if destination.value not in self.DESTINATION_TRANSITIONS.get(row.folder, set()):
+                    await ses.write( Status.ERR, f"Cannot move {row.folder} to {destination.value}." )
                     return
 
             placeholders = self._placeholders(message_ids)
@@ -1260,10 +1248,7 @@ class PearlescentServer:
             return
 
         if len(args) > 1:
-            await ses.write(
-                Status.ERR,
-                "Byte-range syntax is not implemented yet."
-            )
+            await ses.write( Status.ERR, "Byte-range syntax is not implemented yet." )
             return
 
         async with ses.conn.cursor() as cursor:
@@ -1315,7 +1300,7 @@ class PearlescentServer:
                 await ses.write(Status.OK, payload)
 
             # FETCH BOTH or BODYONLY marks inbound mail as seen.
-            if direction == 'INBOUND' and mode != "METAONLY":
+            if direction == Direction.INBOUND and mode != "METAONLY":
                 await cursor.execute(
                     """UPDATE inbound_message SET seen = TRUE, read_at = COALESCE(read_at, CURRENT_TIMESTAMP(6))
                     WHERE account_id = %s AND message_id = %s;""",
@@ -1348,24 +1333,15 @@ class PearlescentServer:
                     message_id,
                 )
 
-                folder, direction = row
+                table = 'inbound_message' if row.direction == Direction.INBOUND else 'outbound_message'
 
-                if direction == 'INBOUND':
-                    await cursor.execute(
-                        """UPDATE message AS m
-                        INNER JOIN inbound_message AS im ON im.message_id = m.message_id
-                        SET m.subject = CONCAT('[', im.current_folder, '] ', m.subject), im.original_folder = im.current_folder, im.current_folder = 'TRASH'
-                        WHERE im.account_id = %s AND im.message_id = %s;""",
-                        (ses.user.user_id, message_id),
-                    )
-                else:
-                    await cursor.execute(
-                        """UPDATE message AS m
-                        INNER JOIN outbound_message AS om ON om.message_id = m.message_id
-                        SET m.subject = CONCAT('[', om.current_folder, '] ', m.subject), om.original_folder = om.current_folder, om.current_folder = 'TRASH'
-                        WHERE om.account_id = %s AND om.message_id = %s;""",
-                        (ses.user.user_id, message_id),
-                    )
+                await cursor.execute(
+                    f"""UPDATE message AS m 
+                    INNER JOIN {table} AS t ON t.message_id = m.message_id
+                    SET t.original_folder = t.current_folder, t.current_folder = 'TRASH'
+                    WHERE t.account_id = %s AND t.message_id = %s;""",
+                    (ses.user.user_id, message_id),
+                )
 
             await ses.conn.commit()
 
@@ -1388,62 +1364,17 @@ class PearlescentServer:
             for message_id in message_ids:
                 row = await self._message_folder( ses, cursor, message_id, )
 
-                folder, direction = row
-
-                if folder not in {'TRASH', 'ARCHIVE'}:
+                if row.folder not in {Folder.TRASH, Folder.ARCHIVE}:
                     await ses.write( Status.ERR, f"Message {message_id} is not in TRASH or ARCHIVE." )
                     return
 
-                table = "inbound_message" if direction == "INBOUND" else "outbound_message"
-
-                await cursor.execute(
-                    f"""SELECT original_folder FROM {table}
-                    WHERE account_id = %s AND message_id = %s;""",
-                    (ses.user.user_id, message_id),
-                )
-
-                original = (await cursor.fetchone())[0]
+                table = "inbound_message" if row.direction == Direction.INBOUND else "outbound_message"
 
                 await cursor.execute(
                     f"""UPDATE {table} SET current_folder = original_folder
                     WHERE account_id = %s AND message_id = %s;""",
                     (ses.user.user_id, message_id),
                 )
-
-                await cursor.execute(
-                    """UPDATE message
-                    SET subject = %s
-                    WHERE message_id = %s;""",
-                    (
-                        self._remove_origin_subject(
-                            (
-                                await cursor.execute(
-                                    "SELECT subject FROM message WHERE message_id = %s",
-                                    (message_id,),
-                                )
-                            )
-                            if False else
-                            ""
-                        ),
-                        message_id,
-                    ),
-                )
-
-            # Re-read subjects separately. This keeps the folder update above
-            # independent from the textual origin cleanup.
-            for message_id in message_ids:
-                await cursor.execute(
-                    "SELECT subject FROM message WHERE message_id = %s;",
-                    (message_id,),
-                )
-                row = await cursor.fetchone()
-
-                if row:
-                    await cursor.execute(
-                        """UPDATE message SET subject = %s
-                        WHERE message_id = %s;""",
-                        ( self._remove_origin_subject(row[0]), message_id, ),
-                    )
 
             await ses.conn.commit()
 
@@ -1466,12 +1397,10 @@ class PearlescentServer:
             for message_id in message_ids:
                 row = await self._message_folder( ses, cursor, message_id, )
 
-                folder, direction = row
-
-                if folder == 'ARCHIVE':
+                if row.folder == Folder.ARCHIVE:
                     continue
 
-                table = ( "inbound_message" if direction == "INBOUND" else "outbound_message" )
+                table = ( "inbound_message" if row.direction == Direction.INBOUND else "outbound_message" )
 
                 await cursor.execute(
                     f"""SELECT current_folder FROM {table}
@@ -1481,15 +1410,9 @@ class PearlescentServer:
                 old_folder = (await cursor.fetchone())[0]
 
                 await cursor.execute(
-                    """UPDATE message SET subject = CONCAT('[', %s, '] ', subject)
-                    WHERE message_id = %s;""",
-                    (old_folder, message_id),
-                )
-
-                await cursor.execute(
                     f"""UPDATE {table} SET original_folder = %s, current_folder = 'ARCHIVE'
                     WHERE account_id = %s AND message_id = %s;""",
-                    ( old_folder, ses.user.user_id, message_id, ),
+                    ( old_folder, ses.user.user_id, message_id ),
                 )
 
             await ses.conn.commit()
@@ -1689,25 +1612,30 @@ class PearlescentServer:
                 await ses.write(Status.ERR, "Message does not exist.")
                 return
 
-            folder, direction = row
-
-            if folder not in {'INBOX', 'SENT', 'MERC', 'JUNK'}:
+            if row.folder not in {Folder.OUTBOX, Folder.SENT, Folder.MERC, Folder.JUNK}:
                 await ses.write( Status.ERR, "Message is not in a forwardable folder." )
                 return
 
             await cursor.execute(
-                """SELECT thread_id, sender_address, subject, payload FROM message
-                WHERE message_id = %s;""",
+                """SELECT EXISTS(SELECT 1 FROM message
+                WHERE message_id = %s);""",
                 (original_id,),
             )
 
-            message = await cursor.fetchone()
+            row = await cursor.fetchone()
 
-            if message is None:
+            if row is None:
                 await ses.write(Status.ERR, "Message does not exist.")
                 return
 
-            thread_id, sender, subject, payload = message
+            await cursor.execute(
+                """SELECT account_id FROM address
+                WHERE address = %s;""",
+                (new_message_id, recipient),
+            )
+            
+            message = await cursor.fetchone()
+            account_id = message[0] if message else None
 
             await cursor.execute(
                 """INSERT INTO message (thread_id, sender_address, subject, payload)
@@ -1720,14 +1648,22 @@ class PearlescentServer:
 
             await cursor.execute(
                 """INSERT INTO message_recipient (account_id, message_id, recipient_type, address)
-                VALUES (NULL, %s, 'TO', %s);""",
-                (new_message_id, recipient),
+                VALUES (%s, %s, 'TO', %s);""",
+                (account_id, new_message_id, recipient),
             )
+            
+            dt = datetime.datetime.now(datetime.timezone.utc)
 
             await cursor.execute(
-                """INSERT INTO outbound_message (message_id, account_id, current_folder, original_folder, out_at)
-                VALUES (%s, %s, %s, 'DRAFTS', CASE WHEN %s THEN CURRENT_TIMESTAMP(6) ELSE NULL END);""",
-                ( new_message_id, ses.user.user_id, 'OUTBOX' if not immediate else 'OUTBOX', immediate, ),
+                """INSERT INTO outbound_message (message_id, account_id, current_folder, original_folder, sent_at, out_at)
+                VALUES (%s, %s, %s, 'DRAFTS', %s, %s);""",
+                (
+                    new_message_id, 
+                    ses.user.user_id, 
+                    Folder.OUTBOX if not immediate else Folder.SENT, immediate,
+                    dt,
+                    None if not immediate else dt
+                ),
             )
 
             # Copy attachments.
@@ -1939,7 +1875,7 @@ class PearlescentServer:
         async with ses.conn.cursor() as cursor:
             row = await self._message_folder( ses, cursor, message_id, )
 
-            if row != ('DRAFTS', 'OUTBOUND'):
+            if row != MessageFolder(Folder.DRAFTS, Direction.OUTBOUND):
                 await ses.write( Status.ERR, "Message is not in DRAFTS." )
                 return
 
@@ -1992,7 +1928,7 @@ class PearlescentServer:
                 message_id,
             )
 
-            if row != ('DRAFTS', 'OUTBOUND'):
+            if row != MessageFolder(Folder.DRAFTS, Direction.OUTBOUND):
                 await ses.write(Status.ERR, "Message is not in DRAFTS.")
                 return
 
@@ -2034,7 +1970,7 @@ class PearlescentServer:
                 message_id,
             )
 
-            if row != ('DRAFTS', 'OUTBOUND'):
+            if row != MessageFolder(Folder.DRAFTS, Direction.OUTBOUND):
                 await ses.write(Status.ERR, "Message is not in DRAFTS.")
                 return
 
@@ -2067,7 +2003,7 @@ class PearlescentServer:
         async with ses.conn.cursor() as cursor:
             row = await self._message_folder( ses, cursor, message_id, )
 
-            if row != ('DRAFTS', 'OUTBOUND'):
+            if row != MessageFolder(Folder.DRAFTS, Direction.OUTBOUND):
                 await ses.write(Status.ERR, "Message is not in DRAFTS.")
                 return
 
@@ -2125,16 +2061,16 @@ class PearlescentServer:
                 for message_id in message_ids:
                     row = await self._message_folder(ses, cursor, message_id)
                     
-                    if row != ('OUTBOX', 'OUTBOUND'):
+                    if row != MessageFolder(Folder.OUTBOX, Direction.OUTBOUND):
                         continue
 
                     if task := self.send_map.pop(message_id, None):
                         task.cancel()
 
                     await cursor.execute(
-                        """UPDATE outbound_message SET current_folder = 'DRAFTS', original_folder = 'OUTBOUND', out_at = NULL
+                        """UPDATE outbound_message SET current_folder = 'DRAFTS', original_folder = 'OUTBOX', sent_at = NULL
                         WHERE account_id = %s AND message_id = %s AND current_folder = 'OUTBOX';""",
-                        (ses.user.user_id, message_id),
+                        (ses.user.user_id, message_id)
                     )
                     aborted_ids.append(message_id)
 
@@ -2146,21 +2082,33 @@ class PearlescentServer:
                 await ses.write(Status.ERR, "No matching pending OUTBOX messages found to abort.")
             return
 
+        immediate = mode == "NOW"
+
         valid_ids = []
         async with ses.conn.cursor() as cursor:
             if not await self._require_messages(ses, cursor, message_ids):
                 return
 
             for message_id in message_ids:
-                row = await self._message_folder(ses, cursor, message_id)
-                if row != ('DRAFTS', 'OUTBOUND'):
+                if message_id in self.send_map: # Prevent double sending
                     continue
+                
+                row = await self._message_folder(ses, cursor, message_id)
+                if row != MessageFolder(Folder.DRAFTS, Direction.OUTBOUND):
+                    continue
+
+                dt = datetime.datetime.now(datetime.timezone.utc)        
 
                 await cursor.execute(
                     """UPDATE outbound_message
-                    SET current_folder = 'OUTBOX', original_folder = 'DRAFTS', out_at = CURRENT_TIMESTAMP(6)
+                    SET current_folder = 'OUTBOX', original_folder = 'DRAFTS', sent_at = %s, out_at = %s
                     WHERE account_id = %s AND message_id = %s AND current_folder = 'DRAFTS';""",
-                    (ses.user.user_id, message_id),
+                    (
+                        ses.user.user_id, 
+                        message_id,
+                        dt,
+                        None if not immediate else dt
+                    ),
                 )
                 valid_ids.append(message_id)
 
@@ -2246,7 +2194,7 @@ class PearlescentServer:
                 message_id,
             )
 
-            if row != ('INBOX', 'INBOUND'):
+            if row != MessageFolder(Folder.OUTBOX, Direction.INBOUND):
                 await ses.write( Status.ERR, "DOWNLOAD requires a message in INBOX." )
                 return
 
@@ -2284,7 +2232,7 @@ class PearlescentServer:
         async with ses.conn.cursor() as cursor:
             row = await self._message_folder( ses, cursor, message_id, )
 
-            if row != ('DRAFTS', 'OUTBOUND'):
+            if row != MessageFolder(Folder.DRAFTS, Direction.OUTBOUND):
                 await ses.write( Status.ERR, "UPLOAD requires a message in DRAFTS." )
                 return
 
@@ -2631,23 +2579,25 @@ class PearlescentServer:
         )
 
     async def contact_op(self, ses: SessionCoordinator) -> None:
-        if not await ses.auth_check():
-            return
-
-        # Contact aliasing is session state, but SessionCoordinator currently
-        # has no contact_alias flag. Until one is added, the command can
-        # acknowledge the setting without pretending it persists.
+        # TODO apply contact aliasing
+        
         args = ses.input_frame.arguments
-
-        if not args:
-            await ses.write( Status.INFO, "Contact aliasing is ON." )
+        
+        if len(args) == 0:
+            await ses.write( Status.OK, f"Contact aliasing is {'ON' if ses.contact_alias else 'OFF'}" )
             return
 
-        if len(args) != 1 or self._parse_bool(args[0]) is None:
-            await ses.write(Status.ERR, "CONTACT accepts ON or OFF.")
+        if len(args) != 1:
+            await ses.write(Status.ERR, "Contact aliasing is ON or OFF.")
             return
 
-        await ses.write( Status.OK, f"Contact aliasing set to {args[0].upper()}." )
+        enabled = self._parse_bool(args[0])
+        if enabled is None:
+            await ses.write(Status.ERR, "Contact aliasing is ON or OFF.")
+            return
+
+        ses.contact_alias = enabled
+        await ses.write( Status.OK, f"Contact aliasing set to {'ON' if enabled else 'OFF'}" )
 
     # ------------------------------------------------------------------
     # Status

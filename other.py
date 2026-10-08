@@ -3,10 +3,19 @@ import asyncio
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import IntEnum, StrEnum, auto
+from typing import NamedTuple
 import aiomysql
 
 from input_frame import InputFrame
 from output_frame import OutputFrame, Status
+
+class Direction(StrEnum):
+    INBOUND = "INBOUND" 
+    OUTBOUND = "OUTBOUND"
+
+class MessageFolder(NamedTuple):
+    current_folder: str 
+    direction: Direction
 
 @dataclass(slots=True)
 class User:
@@ -52,6 +61,7 @@ class SessionCoordinator:
     input_frame: InputFrame | None = None
     view_only: bool = False
     notify: bool = True
+    contact_alias: bool = True
     is_eof: bool = False
     notification_queue: asyncio.Queue = field(
         default_factory=asyncio.Queue
@@ -83,7 +93,7 @@ class SessionCoordinator:
                 self.is_eof = True
         
     async def write(self, status: Status, *entries: str):
-        await OutputFrame(self.version, status, entries).to_wire(self.writer)
+        await OutputFrame(self.version, status, *entries).to_wire(self.writer)
     
     async def auth_check(self):
         if self.mode != SessionMode.AUTHENTICATED:
