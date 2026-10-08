@@ -14,7 +14,7 @@ class Direction(StrEnum):
     OUTBOUND = "OUTBOUND"
 
 class MessageFolder(NamedTuple):
-    current_folder: str 
+    current_folder: Folder
     direction: Direction
 
 @dataclass(slots=True)
