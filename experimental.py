@@ -1,5 +1,5 @@
 import asyncio
-import datetime
+from datetime import datetime, timezone
 from enum import IntEnum, auto
 import math
 import re
@@ -30,6 +30,7 @@ class PearlescentServer:
     NAMESPACE = uuid.UUID("99b00d33-11b3-4f37-bd46-18a624fcfe74")
 
     TIMEOUT = 300
+    SEND_DELAY = 60
 
     DESTINATION_TRANSITIONS = frozendict({
         Folder.OUTBOX: {Folder.DRAFTS, Folder.TRASH, Folder.ARCHIVE},
@@ -43,24 +44,11 @@ class PearlescentServer:
     })
 
     INBOUND_FOLDERS = frozenset((Folder.INBOX, Folder.MERC, Folder.JUNK, Folder.ARCHIVE, Folder.TRASH))
-
     ORDINARY_INBOUND_FOLDERS = frozenset((Folder.INBOX, Folder.MERC, Folder.JUNK))
-
     OUTBOUND_FOLDERS = frozenset((Folder.DRAFTS, Folder.OUTBOX, Folder.SENT, Folder.ARCHIVE, Folder.TRASH))
 
-    SAFE_CIPHERS = (
-        "ECDHE-ECDSA-AES256-GCM-SHA384:"
-        "ECDHE-RSA-AES256-GCM-SHA384:"
-        "ECDHE-ECDSA-CHACHA20-POLY1305:"
-        "ECDHE-RSA-CHACHA20-POLY1305:"
-        "ECDHE-ECDSA-AES128-GCM-SHA256:"
-        "ECDHE-RSA-AES128-GCM-SHA256"
-    )
+    SAFE_CIPHERS = "ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384:ECDHE-ECDSA-CHACHA20-POLY1305:ECDHE-RSA-CHACHA20-POLY1305:ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256"
     SSL_OPTIONS = ssl.OP_NO_SSLv3 | ssl.OP_NO_SSLv2 | ssl.OP_NO_TLSv1 | ssl.OP_NO_TLSv1_1 | ssl.OP_CIPHER_SERVER_PREFERENCE | ssl.OP_NO_RENEGOTIATION
-
-    SEND_DELAY = 60
-
-    REM_ORIGIN_SUBJ_REGX = re.compile(r'^\[(INBOX|MERC|JUNK|ARCHIVE|TRASH|DRAFTS|OUTBOX|SENT)\]\s*')
 
     def __init__(self):
         self.db = Database()
@@ -97,13 +85,17 @@ class PearlescentServer:
             return None
 
     @staticmethod
-    def _parse_bool(value: str) -> bool | None:
+    def _parse_toggle(value: str) -> bool | None:
         value = value.upper()
         if value == "ON":
             return True
         if value == "OFF":
             return False
         return None
+
+    @staticmethod
+    def _parse_bool(value: bool) -> str:
+        return "ON" if value else "OFF"
 
     async def _message_exists(
         self,
@@ -688,8 +680,8 @@ class PearlescentServer:
                     (account_id,),
                 )
                 await cursor.execute(
-                    """DELETE FROM mirror
-                    WHERE account_id = %s;""",
+                    """UPDATE mirror SET enabled = FALSE, disabled_at = CURRENT_TIMESTAMP(6)
+                    WHERE account_id = %s AND NOT enabled;""",
                     (account_id,),
                 )
                 await ses.conn.commit()
@@ -728,7 +720,7 @@ class PearlescentServer:
             await ses.write( Status.ERR, "FEATURE requires ON/OFF and at least one feature." )
             return
 
-        enabled = self._parse_bool(args[0])
+        enabled = self._parse_toggle(args[0])
         if enabled is None:
             await ses.write(Status.ERR, "Feature state must be ON or OFF.")
             return
@@ -750,26 +742,26 @@ class PearlescentServer:
             await ses.write(Status.ERR, "VIEWONLY accepts ON or OFF.")
             return
 
-        enabled = self._parse_bool(args[0])
+        enabled = self._parse_toggle(args[0])
         if enabled is None:
             await ses.write(Status.ERR, "VIEWONLY accepts ON or OFF.")
             return
 
         ses.view_only = enabled
-        await ses.write( Status.OK, f"Viewonly mode set to {'ON' if enabled else 'OFF'}" )
+        await ses.write( Status.OK, f"Viewonly mode set to {self._parse_bool(enabled)}" )
 
     async def notify_op(self, ses: SessionCoordinator) -> None:
         args = ses.input_frame.arguments
 
         if len(args) == 0:
-            await ses.write( Status.OK, "Notify mode is ON" if ses.notify else "Notify mode is OFF" )
+            await ses.write( Status.OK, f"Notify mode is {self._parse_bool(ses.notify)}")
             return
 
         if len(args) != 1:
             await ses.write(Status.ERR, "NOTIFY accepts ON or OFF.")
             return
 
-        enabled = self._parse_bool(args[0])
+        enabled = self._parse_toggle(args[0])
         if enabled is None:
             await ses.write(Status.ERR, "NOTIFY accepts ON or OFF.")
             return
@@ -777,7 +769,7 @@ class PearlescentServer:
         ses.notify = enabled
         await ses.write(
             Status.OK,
-            f"Notify mode set to {'ON' if enabled else 'OFF'}"
+            f"Notify mode set to {self._parse_bool(enabled)}"
         )
 
     # ------------------------------------------------------------------
@@ -811,7 +803,7 @@ class PearlescentServer:
         await ses.write(
             Status.OK, f"You have {len(rows)} addresses registered.",
             *[
-                f"{address} {unseen} {'ON' if enabled else 'OFF'}"
+                f"{address} {unseen} {self._parse_bool(enabled)}"
                 for address, enabled, unseen in rows
             ],
         )
@@ -938,14 +930,14 @@ class PearlescentServer:
             if row is None:
                 await ses.write(Status.ERR, "Address does not exist.")
             else:
-                await ses.write(Status.OK, "ON" if row[0] else "OFF")
+                await ses.write(Status.OK, self._parse_bool(row[0]))
             return
 
         if len(args) != 2:
             await ses.write(Status.ERR, "ADDR accepts [ON|OFF] ADDRESS.")
             return
 
-        enabled = self._parse_bool(args[0])
+        enabled = self._parse_toggle(args[0])
         if enabled is None:
             await ses.write(Status.ERR, "Address state must be ON or OFF.")
             return
@@ -1062,7 +1054,7 @@ class PearlescentServer:
             await ses.write( Status.ERR, "SEEN requires ON/OFF and at least one Message UID." )
             return
 
-        seen = self._parse_bool(args[0])
+        seen = self._parse_toggle(args[0])
         if seen is None:
             await ses.write(Status.ERR, "SEEN accepts ON or OFF.")
             return
@@ -1084,8 +1076,8 @@ class PearlescentServer:
 
             if seen:
                 await cursor.execute(
-                    f"""UPDATE inbound_message SET seen = TRUE, read_at = COALESCE(read_at, CURRENT_TIMESTAMP(6))
-                    WHERE account_id = %s AND message_id IN ({placeholders});""",
+                    f"""UPDATE inbound_message SET seen = TRUE, read_at = CURRENT_TIMESTAMP(6)
+                    WHERE account_id = %s AND message_id IN ({placeholders}) AND NOT SEEN;""",
                     (ses.user.user_id, *message_ids),
                 )
             else:
@@ -1096,8 +1088,8 @@ class PearlescentServer:
                 )
 
             await ses.conn.commit()
-
-        await ses.write( Status.OK, f"Set {len(message_ids)} message(s) seen state to " f"{'ON' if seen else 'OFF'}." )
+        
+        await ses.write( Status.OK, f"Set {len(message_ids)} message(s) seen state to " f"{self._parse_bool(seen)}." )
 
     # ------------------------------------------------------------------
     # Listing
@@ -1150,8 +1142,7 @@ class PearlescentServer:
                     FROM outbound_message AS om
                     INNER JOIN message AS m ON m.message_id = om.message_id
                     WHERE om.account_id = %s AND om.current_folder = %s
-                    ORDER BY COALESCE( om.sent_at, om.out_at, om.drafted_at
-                    );""",
+                    ORDER BY COALESCE(om.sent_at, om.out_at, om.drafted_at);""",
                     (ses.user.user_id, folder.value),
                 )
 
@@ -1287,8 +1278,8 @@ class PearlescentServer:
                     f"SUBJECT {subject}",
                     f"FOLDER {current_folder}",
                     f"ORIGINAL {original_folder}",
-                    f"FLAG {'ON' if flagged else 'OFF'}",
-                    f"SEEN {'ON' if seen else 'OFF'}"
+                    f"FLAG {self._parse_bool(flagged)}",
+                    f"SEEN {self._parse_bool(seen)}"
                     if seen is not None
                     else "SEEN N/A",
                     f"CREATED {created_at}",
@@ -1299,14 +1290,16 @@ class PearlescentServer:
             if mode != "METAONLY":
                 await ses.write(Status.OK, payload)
 
-            # FETCH BOTH or BODYONLY marks inbound mail as seen.
-            if direction == Direction.INBOUND and mode != "METAONLY":
-                await cursor.execute(
-                    """UPDATE inbound_message SET seen = TRUE, read_at = COALESCE(read_at, CURRENT_TIMESTAMP(6))
-                    WHERE account_id = %s AND message_id = %s;""",
-                    (ses.user.user_id, message_id),
-                )
-                await ses.conn.commit()
+                # FETCH BOTH or BODYONLY marks inbound mail as seen.
+                if direction == Direction.INBOUND:
+                    await cursor.execute(
+                        """UPDATE inbound_message SET seen = TRUE, read_at = CURRENT_TIMESTAMP(6)
+                        WHERE account_id = %s AND message_id = %s AND NOT seen;""",
+                        (ses.user.user_id, message_id),
+                    )
+                    await ses.conn.commit()
+                    
+                    #TODO send seen notification if rowcount > 0
 
     # ------------------------------------------------------------------
     # Delete/archive/restore/flag/tag
@@ -1429,7 +1422,7 @@ class PearlescentServer:
             await ses.write( Status.ERR, "FLAG requires ON/OFF and Message UID(s)." )
             return
 
-        enabled = self._parse_bool(args[0])
+        enabled = self._parse_toggle(args[0])
         if enabled is None:
             await ses.write(Status.ERR, "FLAG accepts ON or OFF.")
             return
@@ -1468,7 +1461,7 @@ class PearlescentServer:
 
         await ses.write(
             Status.OK,
-            f"Flagged state set to {'ON' if enabled else 'OFF'} "
+            f"Flagged state set to {self._parse_bool(enabled)} "
             f"for {len(message_ids)} message(s)."
         )
 
@@ -1482,7 +1475,7 @@ class PearlescentServer:
             await ses.write( Status.ERR, "TAG requires ON/OFF, a tag, and Message UID(s)." )
             return
 
-        enabled = self._parse_bool(args[0])
+        enabled = self._parse_toggle(args[0])
         if enabled is None:
             await ses.write(Status.ERR, "TAG accepts ON or OFF.")
             return
@@ -1652,7 +1645,7 @@ class PearlescentServer:
                 (account_id, new_message_id, recipient),
             )
             
-            dt = datetime.datetime.now(datetime.timezone.utc)
+            dt = datetime.now(timezone.utc)
 
             await cursor.execute(
                 """INSERT INTO outbound_message (message_id, account_id, current_folder, original_folder, sent_at, out_at)
@@ -2043,13 +2036,13 @@ class PearlescentServer:
             await ses.write(Status.ERR, "Message UID is required.")
             return
 
+        mode = args[-1] if args[-1] in {"NOW", "ABORT"} else None
+
         try:
-            message_ids = [int(value) for value in args if value.upper() not in {"NOW", "ABORT"}]
+            message_ids = [int(value) for value in (args if mode is None else args[:-1])]
         except ValueError:
             await ses.write(Status.ERR, "Invalid Message UID.")
             return
-
-        mode = next((value.upper() for value in args if value.upper() in {"NOW", "ABORT"}), None)
 
         if mode == "ABORT":
             aborted_ids = []
@@ -2097,7 +2090,7 @@ class PearlescentServer:
                 if row != MessageFolder(Folder.DRAFTS, Direction.OUTBOUND):
                     continue
 
-                dt = datetime.datetime.now(datetime.timezone.utc)        
+                dt = datetime.now(timezone.utc)        
 
                 await cursor.execute(
                     """UPDATE outbound_message
@@ -2270,7 +2263,7 @@ class PearlescentServer:
                     await ses.write(Status.OK, current[0])
                 return
 
-            enabled = self._parse_bool(args[0])
+            enabled = self._parse_toggle(args[0])
 
             if enabled is None:
                 await ses.write(Status.ERR, "MIRROR accepts ON or OFF.")
@@ -2298,7 +2291,7 @@ class PearlescentServer:
                 await ses.write(Status.OK, current[0])
                 return
 
-            timestamp = int(datetime.datetime.now().timestamp())
+            timestamp = int(datetime.now(timezone.utc).timestamp())
             random_part = uuid.uuid4().hex
 
             address = f"{timestamp}{random_part}@pearlescent.mail"
@@ -2339,7 +2332,7 @@ class PearlescentServer:
         await ses.write(
             Status.OK,
             *[
-                f"{uid} {'ON' if enabled else 'OFF'} "
+                f"{uid} {self._parse_bool(enabled)} "
                 f"{priority} {filter_json} {operations_json}"
                 for uid, enabled, priority,
                     filter_json, operations_json in rows
@@ -2390,7 +2383,7 @@ class PearlescentServer:
 
                 await ses.conn.commit()
 
-            await ses.write( Status.OK, f"{len(action_uids)} action(s) set to {'ON' if enabled else 'OFF'}.")
+            await ses.write( Status.OK, f"{len(action_uids)} action(s) set to {self._parse_bool(enabled)}.")
             return
 
         # ACT UID DEL
@@ -2435,7 +2428,7 @@ class PearlescentServer:
             await ses.write( Status.ERR, "BLOCK requires ON/OFF and at least one address." )
             return
 
-        enabled = self._parse_bool(args[0])
+        enabled = self._parse_toggle(args[0])
 
         if enabled is None:
             await ses.write(Status.ERR, "BLOCK accepts ON or OFF.")
@@ -2573,7 +2566,7 @@ class PearlescentServer:
                 f"{name} {address} "
                 f"{about or '-'} {added_at} "
                 f"RECEIVED={received} SENT={sent} "
-                f"BLOCKED={'ON' if blocked else 'OFF'}"
+                f"BLOCKED={self._parse_bool(blocked)}"
                 for ( name, address, about, added_at, received, sent, blocked, ) in rows
             ],
         )
@@ -2584,20 +2577,20 @@ class PearlescentServer:
         args = ses.input_frame.arguments
         
         if len(args) == 0:
-            await ses.write( Status.OK, f"Contact aliasing is {'ON' if ses.contact_alias else 'OFF'}" )
+            await ses.write( Status.OK, f"Contact aliasing is {self._parse_bool(ses.contact_alias)}" )
             return
 
         if len(args) != 1:
             await ses.write(Status.ERR, "Contact aliasing is ON or OFF.")
             return
 
-        enabled = self._parse_bool(args[0])
+        enabled = self._parse_toggle(args[0])
         if enabled is None:
             await ses.write(Status.ERR, "Contact aliasing is ON or OFF.")
             return
 
         ses.contact_alias = enabled
-        await ses.write( Status.OK, f"Contact aliasing set to {'ON' if enabled else 'OFF'}" )
+        await ses.write( Status.OK, f"Contact aliasing set to {self._parse_bool(enabled)}" )
 
     # ------------------------------------------------------------------
     # Status

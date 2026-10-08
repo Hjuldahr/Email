@@ -625,7 +625,7 @@ The offset is optional. The end position is mandatory when a range is supplied.
 ## **7.6 SEND**
 
 Opcode: 0x506  
-SEND \<Message UID\> \[\<NOW|ABORT\>\]
+SEND \<Message UID\>... \[\<NOW|ABORT\>\]
 
 Moves the specified draft from `DRAFTS` to `OUTBOX`.
 

@@ -63,9 +63,6 @@ class SessionCoordinator:
     notify: bool = True
     contact_alias: bool = True
     is_eof: bool = False
-    notification_queue: asyncio.Queue = field(
-        default_factory=asyncio.Queue
-    )
 
     def purge_auth(self):
         self.user = None
