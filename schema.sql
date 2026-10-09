@@ -87,7 +87,7 @@ CREATE TABLE message_recipient (
     recipient_type ENUM('TO', 'CC', 'BCC') NOT NULL, 
     address VARCHAR(254) NOT NULL, 
     recipient_order INT UNSIGNED NOT NULL DEFAULT 0, 
-    KEY (message_id, recipient_type, recipient_order), 
+    KEY (recipient_type, message_id, recipient_order), 
     UNIQUE KEY (message_id, recipient_type, address),
     FOREIGN KEY (message_id) REFERENCES message(message_id) ON DELETE CASCADE, 
     FOREIGN KEY (account_id) REFERENCES account(account_id) ON DELETE CASCADE
@@ -103,8 +103,8 @@ CREATE TABLE inbound_message (
     received_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
     read_at DATETIME(6) NULL,
     updated_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6) ON UPDATE CURRENT_TIMESTAMP(6), 
-    KEY (account_id, current_folder, message_id),
     PRIMARY KEY (account_id, message_id),
+    KEY (account_id, message_id, current_folder),
     FOREIGN KEY (message_id) REFERENCES message(message_id) ON DELETE CASCADE,
     FOREIGN KEY (account_id) REFERENCES account(account_id) ON DELETE CASCADE
 );
@@ -127,8 +127,8 @@ CREATE TABLE outbound_message (
     out_at DATETIME(6) NULL,
     sent_at DATETIME(6) NULL,
     updated_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6) ON UPDATE CURRENT_TIMESTAMP(6), 
-    KEY (account_id, current_folder, message_id),
     PRIMARY KEY (account_id, message_id),
+    KEY (account_id, message_id, current_folder),
     FOREIGN KEY (message_id) REFERENCES message(message_id) ON DELETE CASCADE,
     FOREIGN KEY (account_id) REFERENCES account(account_id) ON DELETE CASCADE
 );

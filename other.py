@@ -4,6 +4,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import IntEnum, StrEnum, auto
 from typing import NamedTuple
+import uuid
 import aiomysql
 
 from input_frame import InputFrame
@@ -45,32 +46,55 @@ class SessionMode(IntEnum):
     MESSAGE_VIEWING = auto()
     MESSAGE_COMPOSING = auto()
 
-@dataclass(slots=True, unsafe_hash=True)
 class SessionCoordinator:
-    # Application level
-    version: int 
-    reader: asyncio.StreamReader
-    writer: asyncio.StreamWriter
-    pool: aiomysql.Pool
-    # Session level
-    conn: aiomysql.connection.Connection
-    # Auth level
-    user: User | None = None
-    # Session level
-    mode: SessionMode = SessionMode.CONNECTED
-    input_frame: InputFrame | None = None
-    view_only: bool = False
-    notify: bool = True
-    contact_alias: bool = True
-    is_eof: bool = False
-    mirror_address: str | None = None
-    notification_queue: asyncio.Queue = field(
-        default_factory=asyncio.Queue
+    # Swap 'session_uid' for '_session_uid' to protect the hash base
+    __slots__ = (
+        'version', 'reader', 'writer', 'pool', 
+        'conn', 'input_frame', 'view_only', 'notify', 'contact_alias', 
+        'is_eof', 'mirror_address', 'notification_queue', '_session_uid',
+        'user', 'mode'
     )
+    
+    def __init__(self,
+        version: int,
+        reader: asyncio.StreamReader,
+        writer: asyncio.StreamWriter,
+        pool: aiomysql.Pool,
+        conn: aiomysql.connection.Connection
+    ):
+        # Application level
+        self.version = version
+        self.reader = reader
+        self.writer = writer
+        self.pool = pool
+        
+        # Session level
+        self._session_uid = uuid.uuid7()
+        self.conn = conn
+        self.mode: SessionMode = SessionMode.CONNECTED
+        self.input_frame: InputFrame | None = None
+        self.view_only = False
+        self.notify = True
+        self.contact_alias = True
+        self.is_eof = False
+        self.mirror_address: str | None = None
+        self.notification_queue = asyncio.Queue()
+        
+        # Auth level
+        self.user: User | None = None
 
-    def purge_auth(self):
-        self.user = None
-        self.mode = SessionMode.CONNECTED
+    @property
+    def session_uid(self) -> uuid.UUID:
+        """Expose read-only UUID to keep the hash stable for collections."""
+        return self._session_uid
+        
+    def __hash__(self) -> int:
+        return hash(self._session_uid)
+
+    def __eq__(self, other: object) -> bool:
+        if not isinstance(other, SessionCoordinator):
+            return False
+        return self._session_uid == other._session_uid 
 
     def open_auth(self, user: User):
         self.user = user

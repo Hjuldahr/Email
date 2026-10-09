@@ -334,7 +334,7 @@ class PearlescentServer:
             self.status = ServerStatus.MALFUNCTIONING
             raise
         
-    async def _safe_write(self, ses, status, entries):
+    async def _safe_write(self, ses: SessionCoordinator, status, entries):
         try:
             await ses.write(status, *entries)
         except Exception:
@@ -465,8 +465,6 @@ class PearlescentServer:
             raise
         except (ConnectionError, asyncio.IncompleteReadError):
             self.sessions.discard(ses)
-
-
 
     async def _secure_listen(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
         peername = writer.get_extra_info("peername")
