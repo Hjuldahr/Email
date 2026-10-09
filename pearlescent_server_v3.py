@@ -1716,15 +1716,8 @@ class PearlescentServer:
                 await ses.write(Status.ERR, "Message does not exist.")
                 return
 
-            await cursor.execute(
-                """SELECT account_id FROM address
-                WHERE address = %s;""",
-                (new_message_id, recipient),
-            )
+            account_id = await self._local_account_id(cursor, recipient)
             
-            message = await cursor.fetchone()
-            account_id = message[0] if message else None
-
             await cursor.execute(
                 """INSERT INTO message (thread_id, sender_address, subject, payload)
                 SELECT thread_id, sender_address, CONCAT('Fwd: ', subject), payload FROM message
@@ -1866,12 +1859,12 @@ class PearlescentServer:
 
             for recipient_type, addresses in recipients.items():
                 for order, address in enumerate(addresses):
-                    # TODO find account_id if locally available
+                    account_id = await self._local_account_id(cursor, address)
 
                     await cursor.execute(
                         """INSERT INTO message_recipient (account_id, message_id, recipient_type, address, recipient_order)
-                        VALUES (NULL, %s, %s, %s, %s);""",
-                        ( None, message_id, recipient_type, address, order ),
+                        VALUES (%s, %s, %s, %s, %s);""",
+                        (account_id, message_id, recipient_type, address, order),
                     )
 
             await cursor.execute(
@@ -1938,18 +1931,23 @@ class PearlescentServer:
                 await ses.write( Status.ERR, "Message is not in DRAFTS." )
                 return
 
+            placeholders = self._placeholders(recipients)
+
             await cursor.execute(
-                """DELETE FROM message_recipient
-                WHERE message_id = %s;""",
-                (message_id,),
+                f"""DELETE FROM message_recipient
+                WHERE message_id = %s AND address NOT IN ({placeholders});""",
+                (message_id, *recipients),
             )
 
-            for order, (recipient_type, address) in enumerate(recipients):
-                await cursor.execute(
-                    """INSERT INTO message_recipient (account_id, message_id, recipient_type, address, recipient_order)
-                    VALUES (NULL, %s, %s, %s, %s);""",
-                    ( message_id, recipient_type, address, order, ),
-                )
+            for recipient_type, addresses in recipients.items():
+                for order, address in enumerate(addresses):
+                    account_id = await self._local_account_id(cursor, address)
+                    
+                    await cursor.execute(
+                        """INSERT IGNORE INTO message_recipient (account_id, message_id, recipient_type, address, recipient_order)
+                        VALUES (%s, %s, %s, %s, %s);""",
+                        (account_id, message_id, recipient_type, address, order),
+                    )
 
             await ses.conn.commit()
 
