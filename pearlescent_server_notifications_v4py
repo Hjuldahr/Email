@@ -1,9 +1,12 @@
 import asyncio
+import base64
+from collections import defaultdict
 from datetime import datetime, timezone
 from enum import IntEnum, auto
 import math
 import re
 import ssl
+from typing import Sequence
 import uuid
 from database import Database
 from input_frame import InputFrame, Operations
@@ -463,6 +466,8 @@ class PearlescentServer:
         except (ConnectionError, asyncio.IncompleteReadError):
             self.sessions.discard(ses)
 
+
+
     async def _secure_listen(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
         peername = writer.get_extra_info("peername")
         ssl_object = writer.get_extra_info('ssl_object')
@@ -683,7 +688,6 @@ class PearlescentServer:
 
         ses.open_auth(User(account_id, username, created_at, last_login_at))
         
-        # Cleaned up string entries by removing embedded \n character anomalies
         await ses.write(
             Status.OK,
             "Login successful.",
@@ -758,14 +762,14 @@ class PearlescentServer:
     # ------------------------------------------------------------------
 
     async def list_feature_op(self, ses: SessionCoordinator) -> None:
-        # TODO replace with real output
+        # TODO fully replace with real output
         await ses.write(
             Status.OK,
             "STATUS ON",
-            "VIEWONLY ON",
-            "NOTIFY ON",
-            "CONTACT ON",
-            "MIRROR ON",
+            f"VIEWONLY {self._parse_bool(ses.view_only)}",
+            f"NOTIFY {self._parse_bool(ses.notify)}",
+            f"CONTACT {self._parse_bool(ses.contact_alias)}",
+            f"MIRROR {self._parse_bool(ses.has_mirror)}",
             "ACTIONS ON",
             "ATTACHMENTS ON",
         )
@@ -1713,7 +1717,7 @@ class PearlescentServer:
                 return
 
             account_id = await self._local_account_id(cursor, recipient)
-
+            
             await cursor.execute(
                 """INSERT INTO message (thread_id, sender_address, subject, payload)
                 SELECT thread_id, sender_address, CONCAT('Fwd: ', subject), payload FROM message
@@ -1770,10 +1774,10 @@ class PearlescentServer:
 
         args = ses.input_frame.arguments
 
-        if len(args) < 3:
+        if len(args) < 4:
             await ses.write(
                 Status.ERR,
-                "DRAFT requires recipient addresses, subject, and payload size."
+                "DRAFT requires source address, recipient addresses, subject, and payload size."
             )
             return
 
@@ -1785,15 +1789,15 @@ class PearlescentServer:
         # argument and recipient specification remains one argument.
         thread_id = None
 
-        if len(args) == 4:
+        if len(args) == 5:
             try:
                 thread_id = int(args[0])
             except ValueError:
                 await ses.write(Status.ERR, "Invalid Thread UID.")
                 return
-            recipient_spec, subject, payload_size = args[1:]
+            src_addr, recipient_spec, subject, payload_size = args[1:]
         else:
-            recipient_spec, subject, payload_size = args
+            src_addr, recipient_spec, subject, payload_size = args
 
         try:
             payload_size = int(payload_size)
@@ -1810,15 +1814,30 @@ class PearlescentServer:
         if recipients is None:
             await ses.write(Status.ERR, "Invalid recipient specification.")
             return
-
+        
+        if not src_addr.strip():
+            await ses.write(Status.ERR, "Source address must be provided")
+            return
+        
         async with ses.conn.cursor() as cursor:
+            # DO NOT add join/union mirror to this, this will violate the burner account social contract
+            await cursor.execute(
+                """SELECT EXISTS (SELECT 1 FROM address 
+                WHERE account_id = %s AND LOWER(address) = LOWER(%s) AND enabled = FALSE);""",
+                (ses.user.user_id, src_addr)
+            )
+            
+            if await cursor.fetchone() is None:
+                await ses.write(Status.ERR, "Address either does not exist, is not owned by you, or is disabled.")
+                return
+            
             if thread_id is not None:
                 await cursor.execute(
-                    """SELECT 1 FROM message AS m
+                    """SELECT EXISTS (SELECT 1 FROM message AS m
                     LEFT JOIN inbound_message AS im ON im.message_id = m.message_id AND im.account_id = %s
                     LEFT JOIN outbound_message AS om ON om.message_id = m.message_id AND om.account_id = %s
                     WHERE m.thread_id = %s AND (im.message_id IS NOT NULL OR om.message_id IS NOT NULL)
-                    LIMIT 1;""",
+                    LIMIT 1);""",
                     (
                         ses.user.user_id,
                         ses.user.user_id,
@@ -1831,42 +1850,22 @@ class PearlescentServer:
                     return
 
             await cursor.execute(
-                """SELECT address FROM address
-                WHERE account_id = %s AND enabled = TRUE;""",
-                (ses.user.user_id,),
-            )
-            own_addresses = {row[0].lower() for row in await cursor.fetchall()}
-
-            for recipient_type, address in recipients:
-                if address.lower() in own_addresses:
-                    continue
-
-                await cursor.execute(
-                    """SELECT 1 FROM block
-                    WHERE account_id = %s AND address = %s
-                    LIMIT 1;""",
-                    (ses.user.user_id, address),
-                )
-
-                if await cursor.fetchone():
-                    await ses.write( Status.ERR, f"Recipient is blocked: {address}" )
-                    return
-
-            await cursor.execute(
-                """INSERT INTO message (thread_id, sender_address, subject, payload)
-                VALUES (%s, %s, %s, '');""",
-                ( thread_id, await self._default_sender_address( ses, cursor, ), subject, ),
+                """INSERT INTO message (thread_id, sender_address, subject)
+                VALUES (%s, %s, %s);""",
+                ( thread_id, src_addr, subject, ),
             )
 
             message_id = cursor.lastrowid
 
-            for order, (recipient_type, address) in enumerate(recipients):
-                account_id = await self._local_account_id(cursor, address)
-                await cursor.execute(
-                    """INSERT INTO message_recipient (account_id, message_id, recipient_type, address, recipient_order)
-                    VALUES (%s, %s, %s, %s, %s);""",
-                    ( account_id, message_id, recipient_type, address, order, ),
-                )
+            for recipient_type, addresses in recipients.items():
+                for order, address in enumerate(addresses):
+                    account_id = await self._local_account_id(cursor, address)
+
+                    await cursor.execute(
+                        """INSERT INTO message_recipient (account_id, message_id, recipient_type, address, recipient_order)
+                        VALUES (%s, %s, %s, %s, %s);""",
+                        (account_id, message_id, recipient_type, address, order),
+                    )
 
             await cursor.execute(
                 """INSERT INTO outbound_message (message_id, account_id, current_folder, original_folder)
@@ -1881,52 +1880,27 @@ class PearlescentServer:
         await ses.write( Status.OK, f"Ready for {payload_size} bytes.", f"MESSAGE {message_id}", )
 
     @staticmethod
-    def _parse_recipient_spec(value: str):
-        result = []
-
+    def _parse_recipient_spec(value: str) -> dict[str, Sequence[str]] | None:
+        result = defaultdict(set)
         # Expected form:
         # TO:a,b,CC:c,BCC:d,e
-        #
-        # A trailing comma is what separates recipient blocks in V4.
+        
         current = None
-
-        for token in value.split(','):
+        for token in value.rstrip(',').split(','):
             if ':' in token:
                 kind, address = token.split(':', 1)
                 kind = kind.upper()
-
                 if kind not in {'TO', 'CC', 'BCC'}:
                     return None
-
                 current = kind
                 if address:
-                    result.append((current, address))
+                    result[current].add(address.strip())
             else:
                 if current is None or not token:
                     return None
-                result.append((current, token))
-
-        return result
-
-    async def _default_sender_address(
-        self,
-        ses: SessionCoordinator,
-        cursor,
-    ) -> str:
-        await cursor.execute(
-            """SELECT address FROM address
-            WHERE account_id = %s AND enabled = TRUE
-            ORDER BY address
-            LIMIT 1;""",
-            (ses.user.user_id,),
-        )
-
-        row = await cursor.fetchone()
-
-        if row is None:
-            raise ProtocolError( "Cannot create an outbound message without an enabled address." )
-
-        return row[0]
+                result[current].add(token.strip())
+                
+        return {kind: sorted(result[kind], key=lambda a: a.casefold()) for kind in result}
 
     async def edit_addr_op(self, ses: SessionCoordinator) -> None:
         if not await ses.auth_check() or not await ses.modify_check():
@@ -1957,19 +1931,23 @@ class PearlescentServer:
                 await ses.write( Status.ERR, "Message is not in DRAFTS." )
                 return
 
+            placeholders = self._placeholders(recipients)
+
             await cursor.execute(
-                """DELETE FROM message_recipient
-                WHERE message_id = %s;""",
-                (message_id,),
+                f"""DELETE FROM message_recipient
+                WHERE message_id = %s AND address NOT IN ({placeholders});""",
+                (message_id, *recipients),
             )
 
-            for order, (recipient_type, address) in enumerate(recipients):
-                account_id = await self._local_account_id(cursor, address)
-                await cursor.execute(
-                    """INSERT INTO message_recipient (account_id, message_id, recipient_type, address, recipient_order)
-                    VALUES (%s, %s, %s, %s, %s);""",
-                    ( account_id, message_id, recipient_type, address, order, ),
-                )
+            for recipient_type, addresses in recipients.items():
+                for order, address in enumerate(addresses):
+                    account_id = await self._local_account_id(cursor, address)
+                    
+                    await cursor.execute(
+                        """INSERT IGNORE INTO message_recipient (account_id, message_id, recipient_type, address, recipient_order)
+                        VALUES (%s, %s, %s, %s, %s);""",
+                        (account_id, message_id, recipient_type, address, order),
+                    )
 
             await ses.conn.commit()
 
@@ -2089,76 +2067,75 @@ class PearlescentServer:
         await ses.write( Status.ERR, "EDIT BODY requires the transport raw-stream extension." )
 
     async def send_task(self, ses: SessionCoordinator, message_id: int, account_id: int):
+        delivered: list[tuple[int, int | None, str, str]] = []
         succeeded = False
         try:
             async with self.send_sem:
                 await asyncio.sleep(self.SEND_DELAY)
-                
-                async with ses.pool.acquire() as conn: 
+
+                async with ses.pool.acquire() as conn:
                     async with conn.cursor() as cursor:
                         await cursor.execute(
                             """UPDATE outbound_message
                             SET current_folder = 'SENT', original_folder = 'OUTBOX', sent_at = CURRENT_TIMESTAMP(6)
                             WHERE account_id = %s AND message_id = %s AND current_folder = 'OUTBOX';""",
-                            (ses.user.user_id, message_id),
+                            (account_id, message_id),
                         )
-                        await conn.commit()
                         succeeded = cursor.rowcount > 0
 
-            if account_id is not None:
-                if succeeded:
-                    async with ses.pool.acquire() as conn:
-                        async with conn.cursor() as cursor:
+                        if succeeded:
                             await cursor.execute(
-                                """SELECT m.thread_id, m.sender_address, m.subject
+                                """SELECT m.thread_id, m.sender_address, m.subject, mr.address
                                 FROM message AS m
-                                WHERE m.message_id = %s;""",
+                                INNER JOIN message_recipient AS mr ON mr.message_id = m.message_id
+                                WHERE m.message_id = %s
+                                ORDER BY mr.recipient_order;""",
                                 (message_id,),
                             )
-                            message = await cursor.fetchone()
+                            rows = await cursor.fetchall()
+                            recipient_accounts = set()
 
-                            if message is not None:
-                                thread_id, sender_address, subject = message
+                            for thread_id, sender_address, subject, address in rows:
+                                recipient_account_id = await self._local_account_id(cursor, address)
+                                if recipient_account_id is None or recipient_account_id in recipient_accounts:
+                                    continue
+                                recipient_accounts.add(recipient_account_id)
+
                                 await cursor.execute(
-                                    """SELECT address FROM message_recipient
-                                    WHERE message_id = %s;""",
-                                    (message_id,),
+                                    """INSERT IGNORE INTO inbound_message
+                                    (account_id, message_id, current_folder, original_folder)
+                                    VALUES (%s, %s, 'INBOX', 'INBOX');""",
+                                    (recipient_account_id, message_id),
                                 )
-                                recipient_addresses = [row[0] for row in await cursor.fetchall()]
-                                recipient_accounts = set()
-                                for address in recipient_addresses:
-                                    recipient_account_id = await self._local_account_id(cursor, address)
-                                    if recipient_account_id is not None:
-                                        recipient_accounts.add(recipient_account_id)
-
-                                for recipient_account_id in recipient_accounts:
-                                    await cursor.execute(
-                                        """INSERT IGNORE INTO inbound_message
-                                        (account_id, message_id, current_folder, original_folder, received_at)
-                                        VALUES (%s, %s, 'INBOX', 'INBOX', CURRENT_TIMESTAMP(6));""",
-                                        (recipient_account_id, message_id),
+                                if cursor.rowcount:
+                                    delivered.append(
+                                        (recipient_account_id, thread_id, sender_address, subject)
                                     )
 
-                                await conn.commit()
+                        await conn.commit()
 
-                                for recipient_account_id in recipient_accounts:
-                                    await self._notify_new_message(
-                                        ses.pool,
-                                        recipient_account_id,
-                                        message_id,
-                                        thread_id,
-                                        sender_address,
-                                        subject or "",
-                                    )
+            if succeeded:
+                await self._queue_notification(account_id, f"SENT MESSAGE={message_id}")
+                for recipient_account_id, thread_id, sender_address, subject in delivered:
+                    try:
+                        await self._notify_new_message(
+                            ses.pool,
+                            recipient_account_id,
+                            message_id,
+                            thread_id,
+                            sender_address,
+                            subject,
+                        )
+                    except Exception as e:
+                        print(f"Failed to notify account {recipient_account_id} about message {message_id}: {e}")
+            else:
+                await self._queue_notification(account_id, f"SEND FAILED MESSAGE={message_id}")
 
-                    await self._queue_notification(account_id, f"SENT MESSAGE={message_id}")
-                else:
-                    await self._queue_notification(account_id, f"SEND FAILED MESSAGE={message_id}")
         except asyncio.CancelledError:
             raise
         except Exception as e:
             print(f"Failed to process background send for message {message_id}: {e}")
-            if account_id is not None:
+            if not succeeded:
                 await self._queue_notification(account_id, f"SEND FAILED MESSAGE={message_id}")
         finally:
             self.send_map.pop(message_id, None)
@@ -2385,21 +2362,11 @@ class PearlescentServer:
             return
 
         async with ses.conn.cursor() as cursor:
-            await cursor.execute(
-                """SELECT address, enabled FROM mirror
-                WHERE account_id = %s
-                ORDER BY mirror_id DESC
-                LIMIT 1;""",
-                (ses.user.user_id,),
-            )
-
-            current = await cursor.fetchone()
-
             if not args:
-                if current is None or not current[1]:
+                if ses.mirror_address is None:
                     await ses.write(Status.INFO, "Mirror is OFF.")
                 else:
-                    await ses.write(Status.OK, current[0])
+                    await ses.write(Status.OK, ses.mirror_address)
                 return
 
             enabled = self._parse_toggle(args[0])
@@ -2424,16 +2391,15 @@ class PearlescentServer:
                 await ses.conn.commit()
 
                 await ses.write( Status.OK, "Mirror disabled." )
+                ses.mirror_address = False
                 return
 
-            if current is not None and current[1]:
-                await ses.write(Status.OK, current[0])
+            if ses.mirror_address is not None:
+                await ses.write(Status.OK, ses.mirror_address)
                 return
 
-            timestamp = int(datetime.now(timezone.utc).timestamp())
-            random_part = uuid.uuid4().hex
-
-            address = f"{timestamp}{random_part}@pearlescent.mail"
+            randomized = base64.urlsafe_b64encode(uuid.uuid7().bytes, padded=False).decode('utf-8')
+            address = f"{randomized}@pearlescent.mail"
 
             await cursor.execute(
                 """INSERT INTO mirror (account_id, address, enabled)
@@ -2443,6 +2409,7 @@ class PearlescentServer:
 
             await ses.conn.commit()
 
+        ses.mirror_address = address
         await ses.write(Status.OK, address)
 
     # ------------------------------------------------------------------
