@@ -554,9 +554,11 @@ Each tag entry provides:
 ## **7.1 DRAFT**
 
 Opcode: 0x501  
-DRAFT \[\<Thread UID\>\] \<Recipient Addresses\> \<Subject Line\> \<Payload Size\>
+DRAFT \[\<Thread UID\>\] \<Source Address\> \<Recipient Addresses\> \<Subject Line\> \<Payload Size\>
 
 Creates a draft message and prepares the connection to receive its body payload.
+
+The source address must be one you own.
 
 The recipient address format is:
 
@@ -573,6 +575,8 @@ The server stops receiving the payload once the declared payload size has been r
 When the upload finishes, the server returns `OK` with the assigned Message UID.
 
 If a Thread UID is supplied, the draft is associated with that thread and is sent as a reply rather than as a new thread.
+
+**Requirement:** AUTHENTICATED
 
 **Requirement:** AUTHENTICATED
 
